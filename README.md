@@ -2,11 +2,13 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/callrail-mcp.svg)](https://pypi.org/project/callrail-mcp/)
 [![Python versions](https://img.shields.io/pypi/pyversions/callrail-mcp.svg)](https://pypi.org/project/callrail-mcp/)
+[![CI](https://github.com/pghdma/callrail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pghdma/callrail-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/)
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the [CallRail REST API v3](https://apidocs.callrail.com/) to any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.).
 
-Built and maintained by [Pittsburgh Digital Marketing Agency](https://pghdma.com).
+Created by **[Steve Japalucci](https://github.com/pghdma)** — Founder of [Pittsburgh Digital Marketing Agency (PGHDMA)](https://pghdma.com).
 
 ## What you can ask Claude to do
 
@@ -162,10 +164,22 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Contributing
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, test conventions, and release flow. Please file issues via [GitHub Issues](https://github.com/pghdma/callrail-mcp/issues) and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+If you discover a security vulnerability, please report it privately per [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## Author
+
+**[Steve Japalucci](https://github.com/pghdma)** — Founder of [Pittsburgh Digital Marketing Agency](https://pghdma.com). Reach out at [s@pghdma.com](mailto:s@pghdma.com).
+
 ## License
 
-MIT © [Pittsburgh Digital Marketing Agency](https://pghdma.com)
+MIT — see [LICENSE](LICENSE). Copyright © 2026 Steve Japalucci / Pittsburgh Digital Marketing Agency.
 
 ## Disclaimer
 
-This project is not affiliated with, endorsed by, or officially supported by CallRail. "CallRail" is a trademark of CallRail, Inc.
+This project is an independent open-source integration and is **not affiliated with, endorsed by, or officially supported by CallRail**. "CallRail" is a trademark of CallRail, Inc. All product names, logos, and brands are property of their respective owners.

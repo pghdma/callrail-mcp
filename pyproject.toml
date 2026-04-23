@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Pittsburgh Digital Marketing Agency", email = "s@pghdma.com" },
+    { name = "Steve Japalucci", email = "s@pghdma.com" },
+]
+maintainers = [
+    { name = "Steve Japalucci", email = "s@pghdma.com" },
 ]
 keywords = ["mcp", "model-context-protocol", "callrail", "claude", "anthropic", "call-tracking"]
 classifiers = [

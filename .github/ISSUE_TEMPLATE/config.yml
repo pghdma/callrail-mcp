@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pghdma/callrail-mcp/security/policy
+    about: Please report security issues privately via SECURITY.md, not as a public issue.
+  - name: Questions & general discussion
+    url: https://github.com/pghdma/callrail-mcp/discussions
+    about: Ask questions or share how you're using the project.
