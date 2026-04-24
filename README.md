@@ -101,7 +101,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
-**41 tools total** across read, write, tracker provisioning, agency aggregation, and account management (Companies/Users CRUD).
+**49 tools total** — ~85% of CallRail's REST API v3 surface. Read tools, write tools, tracker provisioning, agency aggregation, account management (Companies/Users CRUD), notifications, integrations discovery, outbound calls, and offline-lead backfill via `create_form_submission`.
 
 ### Read tools
 

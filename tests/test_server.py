@@ -2761,6 +2761,206 @@ def test_v061_update_user_empty_email_says_required(
     assert "required" in out["message"]
 
 
+# ============================================================
+# v0.7.0 — Final API parity (the safe, account-perm-allowed subset)
+# ============================================================
+
+@responses.activate
+def test_v070_get_tag_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/tags/12345.json",
+        json={"id": 12345, "name": "lead"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_tag(tag_id="12345"))
+    assert out["id"] == 12345
+
+
+def test_v070_get_tag_rejects_non_numeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.get_tag(tag_id="abc"))
+    assert out["error"] is True
+    assert "numeric" in out["message"]
+
+
+@responses.activate
+def test_v070_list_integrations_requires_company_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.list_integrations(company_id=""))
+    assert out["error"] is True
+
+
+@responses.activate
+def test_v070_list_integrations_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/integrations.json",
+        json={"integrations": [{"id": 1, "type": "GoogleMyBusiness"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.list_integrations(company_id="COM_X"))
+    assert out["integrations"][0]["type"] == "GoogleMyBusiness"
+    assert "company_id=COM_X" in responses.calls[1].request.url
+
+
+@responses.activate
+def test_v070_get_integration(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/integrations/123.json",
+        json={"id": 123, "type": "Webhook"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_integration(integration_id="123"))
+    assert out["id"] == 123
+
+
+def test_v070_create_form_submission_requires_three_url_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three of referrer/referring_url/landing_page_url required by CallRail."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_form_submission(
+        company_id="COM_X", referrer="", referring_url="x", landing_page_url="y",
+    ))
+    assert out["error"] is True
+    assert "referrer" in out["message"]
+
+
+@responses.activate
+def test_v070_create_form_submission_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/form_submissions.json",
+        json={"id": "FOR_NEW"},
+        status=201,
+    )
+    out = json.loads(server_mod.create_form_submission(
+        company_id="COM_X",
+        referrer="(direct)",
+        referring_url="https://offline",
+        landing_page_url="https://offline",
+        customer_name="Walk-In Lead",
+        note="Came in person",
+    ))
+    assert out["id"] == "FOR_NEW"
+    body = json.loads(responses.calls[1].request.body)
+    assert body["company_id"] == "COM_X"
+    assert body["customer_name"] == "Walk-In Lead"
+
+
+def test_v070_create_outbound_call_requires_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror create_tracker's confirm_billing pattern — outbound calls
+    are dangerous (real dialing + minute cost + legal implications)."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_outbound_call(
+        from_number="+14129548337", to_number="+14125551234",
+    ))
+    assert out["error"] is True
+    assert "confirm_dialing" in out["message"]
+
+
+def test_v070_create_outbound_call_rejects_bad_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_outbound_call(
+        from_number="not-a-phone", to_number="+14125551234",
+        confirm_dialing=True,
+    ))
+    assert out["error"] is True
+
+
+def test_v070_create_notification_requires_alert_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_notification(
+        name="Test", user_id="USR_X", alert_type="",
+    ))
+    assert out["error"] is True
+
+
+@responses.activate
+def test_v070_create_notification_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/notifications.json",
+        json={"id": 9999, "name": "All calls"},
+        status=201,
+    )
+    out = json.loads(server_mod.create_notification(
+        name="All calls", user_id="USR_X", alert_type="all_calls",
+    ))
+    assert out["id"] == 9999
+
+
+def test_v070_update_notification_no_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_notification(notification_id="1234"))
+    assert out["error"] is True
+    assert "No fields supplied" in out["message"]
+
+
+@responses.activate
+def test_v070_delete_notification(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        "https://api.callrail.com/v3/a/ACC1/notifications/1234.json",
+        status=204,
+    )
+    out = json.loads(server_mod.delete_notification(notification_id="1234"))
+    assert out["deleted"] is True
+
+
 def test_v060_create_user_warns_on_unknown_role(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:

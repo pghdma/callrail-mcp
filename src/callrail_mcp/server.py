@@ -3159,6 +3159,463 @@ def get_webhook(webhook_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
+# ============================================================
+# v0.7.0 — Final API parity push (the safe, account-permission-allowed
+# subset). SMS send + webhook integration CRUD are NOT shipped — they
+# return 403 on standard CallRail accounts (need separately-enabled
+# A2P SMS / Integration Admin permissions). See CLAUDE.md "API
+# coverage limits" for details.
+# ============================================================
+
+# Common alert types for notifications. Discovered via empirical POST
+# probing — incomplete; CallRail likely supports more (per-plan).
+VALID_NOTIFICATION_ALERT_TYPES: tuple[str, ...] = (
+    "all_calls",
+    "first_time_callers",
+    "all_texts",
+    "first_time_texters",
+    "missed_calls",
+    "voicemails",
+    "all_form_submissions",
+)
+
+
+@mcp.tool()
+def get_tag(tag_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one tag.
+
+    Args:
+        tag_id: Numeric tag id.
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(tag_id, "tag_id")
+    if not ok:
+        return _err_msg(msg)
+    if not _TAG_ID_RE.match(tag_id):
+        return _err_msg(f"tag_id={tag_id!r} must be numeric (CallRail tag IDs are integers).")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/tags/{tag_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_integrations(
+    company_id: str,
+    per_page: int = 100,
+    page: int = 1,
+    account_id: str | None = None,
+) -> str:
+    """List integrations attached to one company (GMB, Google Ads,
+    Facebook, Slack, Webhooks, etc.).
+
+    Args:
+        company_id: 'COM...' id. **Required** — the integrations endpoint
+            returns 400 without it (account-level listing isn't supported).
+        per_page: Page size (max 250).
+        page: 1-indexed.
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params = {
+            "company_id": company_id,
+            "per_page": _clamp_per_page(per_page),
+            "page": max(1, page),
+        }
+        return _ok(client.get(f"a/{aid}/integrations.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_integration(integration_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one integration.
+
+    Args:
+        integration_id: Numeric integration id (from list_integrations).
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(integration_id, "integration_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(integration_id, "integration_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(integration_id, "integration_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/integrations/{integration_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_form_submission(
+    company_id: str,
+    referrer: str,
+    referring_url: str,
+    landing_page_url: str,
+    form_url: str | None = None,
+    form_data: dict[str, Any] | None = None,
+    customer_phone_number: str | None = None,
+    customer_name: str | None = None,
+    customer_email: str | None = None,
+    note: str | None = None,
+    tags: list[str] | None = None,
+    value: float | None = None,
+    lead_status: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Manually create a form submission (e.g. backfill an offline lead).
+
+    Useful when you receive a lead through a non-CallRail-tracked channel
+    (paper form, in-person, etc.) and want it visible in CallRail with
+    proper attribution + lead-status workflow.
+
+    Args:
+        company_id: 'COM...' id. Required.
+        referrer / referring_url / landing_page_url: All three required
+            (CallRail enforces "either session_id or all 3 of these").
+            Use the original web context if known, or "(direct)" /
+            "https://offline" placeholders for in-person leads.
+        form_url: URL of the form page if applicable.
+        form_data: Dict of form-field values (e.g.
+            `{"name": "Kevin", "email": "k@x.com", "phone": "412-555-1234"}`).
+        customer_phone_number / name / email: Set on the submission directly
+            (overrides form_data if both are set).
+        note, tags, value, lead_status: Standard lead-management fields.
+        account_id: Auto-resolves if omitted.
+    """
+    for value_, field in (
+        (company_id, "company_id"),
+        (referrer, "referrer"),
+        (referring_url, "referring_url"),
+        (landing_page_url, "landing_page_url"),
+    ):
+        ok, msg = _require_non_empty(value_, field)
+        if not ok:
+            return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
+    if note is not None:
+        ok, msg = _validate_length(note, "note", _MAX_NOTE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if customer_email is not None:
+        ok, msg = _validate_email(customer_email, "customer_email")
+        if not ok:
+            return _err_msg(msg)
+    if customer_phone_number is not None:
+        ok, msg = _validate_phone(customer_phone_number, "customer_phone_number")
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
+        return _err_msg(
+            f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
+        )
+
+    body: dict[str, Any] = {
+        "company_id": company_id,
+        "referrer": referrer,
+        "referring_url": referring_url,
+        "landing_page_url": landing_page_url,
+    }
+    for key, val in (
+        ("form_url", form_url),
+        ("form_data", form_data),
+        ("customer_phone_number", customer_phone_number),
+        ("customer_name", customer_name),
+        ("customer_email", customer_email),
+        ("note", note),
+        ("tags", tags),
+        ("value", value),
+        ("lead_status", lead_status),
+    ):
+        if val is not None:
+            body[key] = val
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/form_submissions.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_outbound_call(
+    from_number: str,
+    to_number: str,
+    confirm_dialing: bool = False,
+    company_id: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """⚠️  Place an outbound call. **THIS ACTUALLY DIALS A REAL PHONE.**
+
+    CallRail will dial `from_number` first; once that's answered, it
+    bridges to `to_number`. Both legs cost minutes against your bundle.
+    Misuse can constitute unlawful telemarketing — verify consent.
+
+    **You must pass `confirm_dialing=True` to actually place the call.**
+    This is a safety guard against accidental AI-driven cold-calls.
+
+    Args:
+        from_number: Your end of the call (typically your tracking number,
+            e.g. `+14129548337`). E.164 format.
+        to_number: Recipient's number. E.164 format.
+        confirm_dialing: REQUIRED — set True to actually dial. Returns
+            error envelope if False (default).
+        company_id: Optional company scope.
+        account_id: Auto-resolves if omitted.
+
+    Returns: The call object CallRail creates (id, etc.).
+    """
+    ok, msg = _require_non_empty(from_number, "from_number")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_phone(from_number, "from_number")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _require_non_empty(to_number, "to_number")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_phone(to_number, "to_number")
+    if not ok:
+        return _err_msg(msg)
+    if company_id is not None:
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
+    if not confirm_dialing:
+        return _err_msg(
+            f"create_outbound_call requires confirm_dialing=True. This places "
+            f"a real phone call from {from_number} to {to_number} — both legs "
+            f"cost minutes and (depending on jurisdiction) may have legal "
+            f"implications. Pass confirm_dialing=True if you intend to dial."
+        )
+    body: dict[str, Any] = {"from": from_number, "to": to_number}
+    if company_id:
+        body["company_id"] = company_id
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/calls.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_notification(
+    name: str,
+    user_id: str,
+    alert_type: str,
+    company_id: str | None = None,
+    tracker_id: str | None = None,
+    send_email: bool = True,
+    send_desktop: bool = False,
+    send_push: bool = False,
+    call_enabled: bool | None = None,
+    sms_enabled: bool | None = None,
+    email: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Create a notification rule (who gets pinged on which event).
+
+    Args:
+        name: Display name for this rule.
+        user_id: 'USR...' id of the user being notified.
+        alert_type: Trigger event. Common values:
+            'all_calls', 'first_time_callers', 'missed_calls',
+            'voicemails', 'all_texts', 'first_time_texters',
+            'all_form_submissions'. Plan-specific types may exist.
+        company_id, tracker_id: Optional scope filters.
+        send_email / send_desktop / send_push: Channel toggles.
+        call_enabled / sms_enabled: Trigger toggles for mixed-event rules.
+        email: Override email address (defaults to user's email).
+        account_id: Auto-resolves if omitted.
+    """
+    for value_, field in ((name, "name"), (user_id, "user_id"), (alert_type, "alert_type")):
+        ok, msg = _require_non_empty(value_, field)
+        if not ok:
+            return _err_msg(msg)
+    ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+    if not ok:
+        return _err_msg(msg)
+    if company_id is not None:
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
+    if tracker_id is not None:
+        ok, msg = _validate_id_shape(tracker_id, "tracker_id", prefix="TRK")
+        if not ok:
+            return _err_msg(msg)
+    if email is not None:
+        ok, msg = _validate_email(email)
+        if not ok:
+            return _err_msg(msg)
+    if alert_type not in VALID_NOTIFICATION_ALERT_TYPES:
+        logger.warning(
+            "create_notification alert_type=%r is not in known set %s; "
+            "CallRail may reject. Adjust VALID_NOTIFICATION_ALERT_TYPES "
+            "in server.py if your plan supports it.",
+            alert_type, VALID_NOTIFICATION_ALERT_TYPES,
+        )
+    body: dict[str, Any] = {
+        "name": name,
+        "user_id": user_id,
+        "alert_type": alert_type,
+        "send_email": send_email,
+        "send_desktop": send_desktop,
+        "send_push": send_push,
+    }
+    for key, val in (
+        ("company_id", company_id),
+        ("tracker_id", tracker_id),
+        ("call_enabled", call_enabled),
+        ("sms_enabled", sms_enabled),
+        ("email", email),
+    ):
+        if val is not None:
+            body[key] = val
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/notifications.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_notification(
+    notification_id: str,
+    name: str | None = None,
+    alert_type: str | None = None,
+    send_email: bool | None = None,
+    send_desktop: bool | None = None,
+    send_push: bool | None = None,
+    call_enabled: bool | None = None,
+    sms_enabled: bool | None = None,
+    email: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Update a notification rule. Pass None to leave fields unchanged."""
+    ok, msg = _require_non_empty(notification_id, "notification_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(notification_id, "notification_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(notification_id, "notification_id")
+    if not ok:
+        return _err_msg(msg)
+    if name is not None:
+        ok, msg = _require_non_empty(name, "name")
+        if not ok:
+            return _err_msg(msg)
+    if alert_type is not None:
+        ok, msg = _require_non_empty(alert_type, "alert_type")
+        if not ok:
+            return _err_msg(msg)
+        if alert_type not in VALID_NOTIFICATION_ALERT_TYPES:
+            logger.warning(
+                "update_notification alert_type=%r is not in known set %s.",
+                alert_type, VALID_NOTIFICATION_ALERT_TYPES,
+            )
+    if email is not None:
+        ok, msg = _require_non_empty(email, "email")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_email(email)
+        if not ok:
+            return _err_msg(msg)
+    body: dict[str, Any] = {}
+    for key, val in (
+        ("name", name),
+        ("alert_type", alert_type),
+        ("send_email", send_email),
+        ("send_desktop", send_desktop),
+        ("send_push", send_push),
+        ("call_enabled", call_enabled),
+        ("sms_enabled", sms_enabled),
+        ("email", email),
+    ):
+        if val is not None:
+            body[key] = val
+    if not body:
+        return _err_msg("No fields supplied to update.")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.put(f"a/{aid}/notifications/{notification_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def delete_notification(notification_id: str, account_id: str | None = None) -> str:
+    """Delete a notification rule."""
+    ok, msg = _require_non_empty(notification_id, "notification_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(notification_id, "notification_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(notification_id, "notification_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        result = client.delete(f"a/{aid}/notifications/{notification_id}.json")
+        return _ok({"deleted": True, "notification_id": notification_id, "response": result})
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_notifications(
+    company_id: str | None = None,
+    user_id: str | None = None,
+    per_page: int = 100,
+    page: int = 1,
+    account_id: str | None = None,
+) -> str:
+    """List notification rules on the account.
+
+    Args:
+        company_id, user_id: Optional filters.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+        account_id: Auto-resolves if omitted.
+    """
+    if company_id is not None:
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
+    if user_id is not None:
+        ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+        if not ok:
+            return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {
+            "per_page": _clamp_per_page(per_page),
+            "page": max(1, page),
+        }
+        if company_id:
+            params["company_id"] = company_id
+        if user_id:
+            params["user_id"] = user_id
+        return _ok(client.get(f"a/{aid}/notifications.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
 def main() -> None:
     """CLI entry point for stdio transport.
 
