@@ -1241,8 +1241,429 @@ def test_v042_get_still_retries_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     assert aid == "ACC1"
 
 
+# ============================================================
+# v0.4.3 — Meta-audit fixes
+# ============================================================
+
+def test_v043_is_toll_free_skips_non_NANP() -> None:
+    """v0.4.3 fix (Finding 9.2): non-NANP numbers (shortcodes, intl) must NOT
+    be classified as local. They were being counted toward the local-number
+    bundle, billing wrong."""
+    from callrail_mcp.server import _is_toll_free
+    # NANP toll-free still detected.
+    assert _is_toll_free("+18005551234") is True
+    assert _is_toll_free("18005551234") is True
+    # Shortcodes (5 digits) — not NANP, return False.
+    assert _is_toll_free("55555") is False
+    assert _is_toll_free("12345") is False
+    # International numbers (UK, +44...) — not NANP, return False.
+    assert _is_toll_free("+44123456789012") is False
+    # NANP local — still False (as before).
+    assert _is_toll_free("+14125551234") is False
+
+
+def test_v043_err_truncates_long_body() -> None:
+    """v0.4.3 fix (Finding 2.1): long error bodies could leak echoed PII.
+    Now truncated to ~500 chars in the envelope."""
+    from callrail_mcp.client import CallRailError
+    long_body = "X" * 2000
+    e = CallRailError("test error", status=400, body=long_body)
+    out = json.loads(server_mod._err(e))
+    assert len(out["body"]) < 600
+    assert "truncated" in out["body"]
+    assert "1500 more chars" in out["body"]
+
+
+def test_v043_err_passes_short_body_unchanged() -> None:
+    from callrail_mcp.client import CallRailError
+    e = CallRailError("oops", status=400, body="not too long")
+    out = json.loads(server_mod._err(e))
+    assert out["body"] == "not too long"
+
+
+def test_v043_validate_window_coerces_string_days() -> None:
+    """v0.4.3 fix (Finding 6.2): MCP clients may send loose JSON (string
+    where int expected). Now coerced gracefully instead of raising."""
+    ok, _ = _validate_window("7", None, None)
+    assert ok
+    ok, msg = _validate_window("not-a-number", None, None)
+    assert not ok
+    assert "integer" in msg
+
+
 @responses.activate
-def test_v042_paginate_handles_missing_total_pages(
+def test_v043_cost_shares_sum_to_agency_total(server_with_mock_client) -> None:
+    """v0.4.3 fix (Finding 4.1): largest-remainder rounding ensures
+    sum(per-company shares) == agency_total exactly. Pre-fix could be off
+    by ±$0.01-0.05 due to float rounding in proportional split."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # 3 companies that each contribute 1/3 of minutes, no numbers.
+    # Without rounding fix: 1/3 of $50 base × 3 = $49.99 or $50.01 → !=
+    # agency_total $50.00.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_A", "name": "A", "status": "active"},
+            {"id": "COM_B", "name": "B", "status": "active"},
+            {"id": "COM_C", "name": "C", "status": "active"},
+        ]},
+        status=200,
+    )
+    # Each company: 0 trackers, 1 minute (60s call).
+    for _ in range(3):
+        responses.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/trackers.json",
+            json={"trackers": [], "total_pages": 1},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [{"duration": 60}], "total_pages": 1},
+            status=200,
+        )
+    out = json.loads(server_mod.usage_summary(days=30))
+    sum_shares = round(sum(c["estimated_cost_share"] for c in out["by_company"]), 2)
+    assert sum_shares == out["agency"]["estimated_cycle_total"]
+
+
+# ============================================================
+# v0.4.3 — Happy-path tests for previously-uncovered tools
+# (Finding 10.1: 11+ tools had ZERO test coverage)
+# ============================================================
+
+@responses.activate
+def test_list_companies_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [{"id": "COM1", "name": "Foo"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.list_companies())
+    assert out["companies"][0]["id"] == "COM1"
+
+
+@responses.activate
+def test_list_users_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/users.json",
+        json={"users": [{"id": "USR1", "email": "s@pghdma.com"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.list_users())
+    assert out["users"][0]["email"] == "s@pghdma.com"
+
+
+@responses.activate
+def test_list_form_submissions_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/form_submissions.json",
+        json={"form_submissions": [{"id": "FOR1", "form_data": {"name": "Kevin"}}]},
+        status=200,
+    )
+    out = json.loads(server_mod.list_form_submissions())
+    assert out["form_submissions"][0]["id"] == "FOR1"
+
+
+@responses.activate
+def test_list_text_messages_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/text-messages.json",
+        json={"conversations": []},
+        status=200,
+    )
+    out = json.loads(server_mod.list_text_messages())
+    assert "conversations" in out
+
+
+@responses.activate
+def test_list_tags_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/tags.json",
+        json={"tags": [{"id": "1", "name": "lead"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.list_tags())
+    assert out["tags"][0]["name"] == "lead"
+
+
+@responses.activate
+def test_get_call_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1", "duration": 60},
+        status=200,
+    )
+    out = json.loads(server_mod.get_call(call_id="CAL1"))
+    assert out["id"] == "CAL1"
+
+
+@responses.activate
+def test_get_call_recording_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1/recording.json",
+        json={"url": "https://example.com/rec.mp3"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_call_recording(call_id="CAL1"))
+    assert "url" in out
+
+
+@responses.activate
+def test_get_call_transcript_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1/transcription.json",
+        json={"transcription": [{"speaker": "agent", "text": "Hello"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.get_call_transcript(call_id="CAL1"))
+    assert "transcription" in out
+
+
+@responses.activate
+def test_update_call_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1", "note": "Hot lead"},
+        status=200,
+    )
+    out = json.loads(server_mod.update_call(call_id="CAL1", note="Hot lead"))
+    assert out["note"] == "Hot lead"
+    body = json.loads(responses.calls[1].request.body)
+    assert body == {"note": "Hot lead"}
+
+
+@responses.activate
+def test_update_form_submission_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/form_submissions/FOR1.json",
+        json={"id": "FOR1", "value": 500.0},
+        status=200,
+    )
+    out = json.loads(
+        server_mod.update_form_submission(submission_id="FOR1", value=500.0)
+    )
+    assert out["value"] == 500.0
+
+
+@responses.activate
+def test_create_tag_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/tags.json",
+        json={"id": "100", "name": "vip"},
+        status=201,
+    )
+    out = json.loads(
+        server_mod.create_tag(name="vip", company_id="COM1", color="green1")
+    )
+    assert out["id"] == "100"
+
+
+@responses.activate
+def test_update_tag_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/tags/100.json",
+        json={"id": "100", "name": "renamed"},
+        status=200,
+    )
+    out = json.loads(server_mod.update_tag(tag_id="100", name="renamed"))
+    assert out["name"] == "renamed"
+
+
+@responses.activate
+def test_delete_tag_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        "https://api.callrail.com/v3/a/ACC1/tags/100.json",
+        status=204,
+    )
+    out = json.loads(server_mod.delete_tag(tag_id="100"))
+    assert out["error"] is False if "error" in out else True
+    # delete_tag returns the result dict (could be bare {} on 204 with no body).
+
+
+@responses.activate
+def test_add_call_tags_happy_path(server_with_mock_client) -> None:
+    """Verifies the GET-then-PUT additive tag flow works end-to-end."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # GET existing tags.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"tags": [{"name": "existing"}]},
+        status=200,
+    )
+    # PUT merged.
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1"},
+        status=200,
+    )
+    json.loads(server_mod.add_call_tags(call_id="CAL1", tags=["new"]))
+    body = json.loads(responses.calls[2].request.body)
+    # Existing + new, deduped, in order.
+    assert body == {"tags": ["existing", "new"]}
+
+
+@responses.activate
+def test_remove_call_tags_happy_path(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"tags": [{"name": "keep"}, {"name": "remove"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1"},
+        status=200,
+    )
+    json.loads(server_mod.remove_call_tags(call_id="CAL1", tags=["remove"]))
+    body = json.loads(responses.calls[2].request.body)
+    assert body == {"tags": ["keep"]}
+
+
+@responses.activate
+def test_search_calls_caps_match_count(server_with_mock_client) -> None:
+    """v0.4.3 fix (Finding 6.1): popular numbers shouldn't return MB-sized
+    JSON. Cap at 500 + flag truncation."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # Return a single page with 600 matching calls.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={
+            "calls": [
+                {"customer_phone_number": "+14125551234", "id": f"CAL_{i}"}
+                for i in range(600)
+            ],
+            "total_pages": 1,
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.search_calls_by_number(phone_number="4125551234", days=30))
+    assert out["truncated"] is True
+    assert out["match_count"] == 500
+    assert out["match_cap"] == 500
+
+
+@responses.activate
+def test_v043_paginate_handles_missing_total_pages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """v0.4.2 fix: previously hardcoded `total_pages` default to 1, silently

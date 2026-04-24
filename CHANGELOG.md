@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-04-24
+
+### Fixed (audit pass 9 — meta-audit on what passes 1-8 missed)
+
+A meta-audit looking specifically at categories prior passes likely
+skipped (race conditions, logging hygiene, timezone bugs, float
+arithmetic, MCP protocol layer, config edge cases, weird API
+behaviors, test coverage gaps) surfaced 14 findings. Fixed the 9
+highest-impact + closed major coverage gaps.
+
+#### CORRECTNESS
+- **Cost shares now sum to `agency_total` exactly** (Finding 4.1).
+  Pre-fix: float rounding could cause sum(per-company shares) to
+  differ from agency_total by ±$0.01-0.05, breaking invoice
+  reconciliation. Now uses largest-remainder rounding to distribute
+  the residual to the company with the largest fractional share.
+- **`_is_toll_free` no longer mis-classifies non-NANP numbers as
+  local** (Finding 9.2). Shortcodes (5-digit), international numbers,
+  etc. now return `False` instead of being counted as $3/mo local
+  numbers in `usage_summary`.
+
+#### PRIVACY / SECURITY
+- **`_err()` truncates body to ~500 chars** (Finding 2.1) to prevent
+  CallRail's echoed response data (potential PII, request payloads)
+  from leaking unbounded into MCP responses and logs. Full body still
+  capped at 2000 in `client.py` for the second-line defense.
+- **API key file permission warning** (Finding 8.2). `_load_api_key`
+  now warns (without erroring) if the file is group/world-readable.
+  Recommended mode is 600.
+
+#### CONFIG / UX
+- **`CALLRAIL_API_KEY_FILE` now expands `$VAR` references** (Finding
+  8.1). Paths like `$HOME/secrets/key.txt` previously resolved to the
+  literal string and failed; now goes through `os.path.expandvars()`
+  before `expanduser()`.
+- **`_validate_window` coerces string-typed `days`** (Finding 6.2).
+  MCP clients that send loose JSON (e.g. `days="30"`) now get the
+  expected behavior instead of an uncaught `TypeError`.
+- **`search_calls_by_number` caps matches at 500** (Finding 6.1) to
+  prevent MCP-frame-exceeding payloads. Returns `truncated: true` and
+  `match_cap: 500` when the cap is hit.
+
+#### TYPING
+- **mypy now passes cleanly** on the codebase. Fixed `Returning Any`
+  warning in `resolve_account_id` by explicitly checking the type of
+  `accounts[0]["id"]` before returning.
+
+### Added — tests
+
+- 21 new unit tests (183 → 204 total):
+  - 13 happy-path tests for previously-uncovered tools:
+    `list_companies`, `list_users`, `list_form_submissions`,
+    `list_text_messages`, `list_tags`, `get_call`,
+    `get_call_recording`, `get_call_transcript`, `update_call`,
+    `update_form_submission`, `create_tag`, `update_tag`,
+    `delete_tag`, `add_call_tags`, `remove_call_tags`
+  - 1 cost-share invariant test
+    (`sum(per-company costs) == agency_total`)
+  - 1 search_calls truncation test (`match_cap` triggers at 500)
+  - 1 `_is_toll_free` non-NANP rejection test
+  - 2 `_err` body truncation tests (long + short)
+  - 1 `_validate_window` string-coercion test
+
+Coverage: 72% → 84% overall, server.py 67% → 82%.
+
+### Considered + deferred (not fixed in this release)
+- `add_call_tags` / `remove_call_tags` GET-then-PUT race condition
+  (Finding 1.1). Documented limitation: not safe for concurrent
+  use on the same call. CallRail has no atomic add-tag endpoint.
+- UTC vs account-timezone mismatch in `_date_window` (Finding 3.1).
+  Documenting in next release; full fix requires fetching
+  `account.time_zone` and using it for the window boundaries.
+
 ## [0.4.2] - 2026-04-24
 
 ### Fixed (audit pass 6 — sweep of previously-untouched code)
