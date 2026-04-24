@@ -23,7 +23,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import MAX_PER_PAGE, CallRailClient, CallRailError
+from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
 
 logging.basicConfig(
     level=os.environ.get("CALLRAIL_LOG_LEVEL", "WARNING").upper(),
@@ -512,10 +512,16 @@ def create_tag(
         name: Tag display name.
         company_id: Required — tags are per-company in CallRail.
         account_id: Auto-resolves if omitted.
-        color: Optional CallRail color name
-            (e.g. 'gray1','red','orange','green','blue','purple','pink',
-            'brown','dark blue','dark green').
+        color: One of the 10 CallRail-supported colors:
+            'red1', 'red2', 'orange1', 'yellow1', 'green1',
+            'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
+            If omitted, CallRail defaults to 'gray1'.
     """
+    if color is not None and color not in VALID_TAG_COLORS:
+        return _ok({
+            "error": True,
+            "message": f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}",
+        })
     try:
         aid = client.resolve_account_id(account_id)
         body: dict[str, Any] = {"name": name, "company_id": company_id}
@@ -533,7 +539,20 @@ def update_tag(
     name: str | None = None,
     color: str | None = None,
 ) -> str:
-    """Rename or recolor a tag."""
+    """Rename or recolor a tag.
+
+    Args:
+        tag_id: Numeric tag id.
+        account_id: Auto-resolves if omitted.
+        name: New display name.
+        color: One of: 'red1', 'red2', 'orange1', 'yellow1', 'green1',
+            'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
+    """
+    if color is not None and color not in VALID_TAG_COLORS:
+        return _ok({
+            "error": True,
+            "message": f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}",
+        })
     try:
         aid = client.resolve_account_id(account_id)
         body: dict[str, Any] = {}
