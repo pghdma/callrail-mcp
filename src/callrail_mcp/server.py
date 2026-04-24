@@ -227,6 +227,28 @@ def _tag_names_from(tags: Any) -> list[str]:
     return out
 
 
+def _coerce_days_int(days: Any) -> int | None:
+    """Best-effort coerce `days` to int. Returns None on bool/garbage.
+
+    Mirrors `_validate_window`'s internal coercion so that downstream
+    int comparisons (e.g. spam_detector's 90-day cap) can't be bypassed
+    by string `days` from loose-JSON MCP clients.
+    """
+    # `bool` is a subclass of int — reject explicitly.
+    if isinstance(days, bool):
+        return None
+    if isinstance(days, int):
+        return days
+    if isinstance(days, float):
+        return int(days) if days.is_integer() else None
+    if days is None:
+        return None
+    try:
+        return int(days)
+    except (TypeError, ValueError):
+        return None
+
+
 def _validate_window(
     days: int | None,
     start_date: str | None,
@@ -2219,6 +2241,11 @@ def compare_periods(
 # Cap on bulk operations to prevent accidentally tagging 10k calls.
 _BULK_UPDATE_CAP = 500
 
+# Cap on spam_detector auto_tag operations. 1000 calls × 2 round-trips
+# (GET fresh tags + PUT merged) × ~100ms ≈ 3 minutes — close to common
+# MCP transport timeouts. Beyond this we slice and surface truncation.
+_SPAM_AUTO_TAG_CAP = 1000
+
 
 @mcp.tool()
 def bulk_update_calls(
@@ -2481,19 +2508,7 @@ def spam_detector(
     # Hard cap on `days` for spam_detector: scoring + auto-tag materializes
     # the full call list in memory before truncating the response.
     # days=365 on a high-volume client could be ~100MB of dicts.
-    # Coerce string `days` (`_validate_window` does this locally but
-    # doesn't return the coerced value) so we can't be bypassed by
-    # `days="365"` from a loose-JSON MCP client.
-    days_int: int | None
-    if isinstance(days, bool):
-        days_int = None  # already rejected by _validate_window
-    elif isinstance(days, int):
-        days_int = days
-    else:
-        try:
-            days_int = int(days) if days is not None else None
-        except (TypeError, ValueError):
-            days_int = None
+    days_int = _coerce_days_int(days)
     if days_int is not None and days_int > 90:
         return _err_msg(
             f"days={days_int} exceeds spam_detector cap of 90. Long windows "
@@ -2597,13 +2612,8 @@ def spam_detector(
                 return _err_msg(msg)
             tagged = 0
             failures: list[dict[str, Any]] = []
-            # Cap operations to prevent runaway tagging loops. 1000 spam
-            # calls × 2 round-trips each = 2000 API calls, ~3 minutes.
-            # Beyond that, MCP transport timeouts can kill the loop and
-            # the user loses the audit trail.
-            SPAM_AUTO_TAG_CAP = 1000
-            tag_target = all_likely_spam[:SPAM_AUTO_TAG_CAP]
-            tag_truncated_at_cap = len(all_likely_spam) > SPAM_AUTO_TAG_CAP
+            tag_target = all_likely_spam[:_SPAM_AUTO_TAG_CAP]
+            tag_truncated_at_cap = len(all_likely_spam) > _SPAM_AUTO_TAG_CAP
             # Iterate the (now possibly cap-truncated) list so auto_tag
             # actually covers what we can practically commit in one call.
             for s in tag_target:
@@ -2635,7 +2645,7 @@ def spam_detector(
             result["tagged_count"] = tagged
             result["tag_attempted_count"] = len(tag_target)
             result["tag_truncated_at_cap"] = tag_truncated_at_cap
-            result["tag_cap"] = SPAM_AUTO_TAG_CAP if tag_truncated_at_cap else None
+            result["tag_cap"] = _SPAM_AUTO_TAG_CAP if tag_truncated_at_cap else None
             result["tag_total_eligible"] = likely_spam_total
             result["tag_failures"] = failures
 

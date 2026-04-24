@@ -63,7 +63,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.5.3
+## Current version: 0.5.4
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -84,7 +84,7 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.5.0` — 3 new agency workflow tools: `compare_periods`, `bulk_update_calls`, `spam_detector` + TZ-aware `_date_window`
 - `0.5.1` — Round 2 audit on v0.5.0: 11 bugs (Unicode tag filtering, partial_failures, TOCTOU race fix, broad exception catching, biggest_mover direction)
 - `0.5.2` — Round 3 audit on v0.5.1: 8 bugs (HIGH: `_tag_names_from` non-list type-check; spam_detector days-cap at 90, dedup TZ warnings, auto_tag uses full filtered list)
-- `0.5.3` — Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
+- `0.5.4` — Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
 
 **Tests: 251 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
