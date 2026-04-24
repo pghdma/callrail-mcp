@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -63,7 +64,7 @@ mcp = FastMCP("callrail-mcp")
 
 # ---- Shared helpers ----
 
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 
 def _validate_date(value: str, field_name: str) -> tuple[bool, str]:
@@ -118,7 +119,13 @@ def _validate_window(
             an acceptable fallback.
     """
     # Coerce string-typed days from MCP clients that send loose JSON.
-    if days is not None and not isinstance(days, int):
+    # Reject non-integer floats explicitly — `int(1.5)` silently truncates,
+    # which would surprise a user who wrote `days=1.5` expecting ~36h.
+    if isinstance(days, float):
+        if not days.is_integer():
+            return False, f"days={days} is not a whole number; pass an integer."
+        days = int(days)
+    elif days is not None and not isinstance(days, int):
         try:
             days = int(days)
         except (TypeError, ValueError):
@@ -157,7 +164,12 @@ def _err(e: CallRailError) -> str:
     # leaking large amounts of echoed data (PII, request payloads) into
     # MCP responses / logs. The full body is already capped at 2000 in
     # client.py; this is a second-line defense for MCP consumers.
-    body: str | None = e.body
+    body: Any = e.body
+    # Defensively decode bytes (CallRailError docs say str|None but a
+    # future contributor might wire bytes through, and json.dumps would
+    # raise TypeError on a bytes value).
+    if isinstance(body, (bytes, bytearray)):
+        body = body.decode("utf-8", errors="replace")
     if isinstance(body, str) and len(body) > 500:
         body = body[:500] + f"... [truncated, {len(e.body) - 500} more chars]"  # type: ignore[arg-type]
     return json.dumps(
@@ -181,12 +193,25 @@ def _digits_only(s: str) -> str:
 # burning a network round-trip and an API error.
 _MAX_TRACKER_NAME_LEN = 255
 _MAX_TTS_MESSAGE_LEN = 500  # whisper_message and greeting_text use TTS
+# Free-text fields on calls/forms. CallRail doesn't document explicit limits
+# but multi-MB bodies are clearly a DoS vector (and unlikely intentional).
+_MAX_NOTE_LEN = 4000
+_MAX_TAGS_PER_REQUEST = 100
+_MAX_CUSTOMER_NAME_LEN = 200
 _VALID_TRACKER_STATUSES: tuple[str, ...] = ("active", "disabled")
-_AREA_CODE_RE = re.compile(r"^\d{3}$")
-# Loose E.164-ish: optional + then 10-15 digits. Accepts +14125551234, 14125551234.
-_PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+# Loose E.164-ish: optional + then 10-15 ASCII digits. Accepts +14125551234,
+# 14125551234. ASCII-only — rejects e.g. Devanagari digits ('\u0966' etc.)
+# that Python's `\d` would otherwise match.
+_PHONE_RE = re.compile(r"^\+?[0-9]{10,15}$")
+_AREA_CODE_RE = re.compile(r"^[0-9]{3}$")  # was ^\d{3}$ — Unicode-digit safe
 _TRACKER_ID_RE = re.compile(r"^TRK[A-Za-z0-9_-]+$")
 _COMPANY_ID_RE = re.compile(r"^COM[A-Za-z0-9_-]+$")
+_TAG_ID_RE = re.compile(r"^[0-9]+$")  # Tag IDs are numeric in CallRail.
+
+# Unicode categories used to reject "invisible" / control / format characters
+# in IDs. Cf=format (RTL/LTR override, ZWJ, etc.), Cc=control,
+# Cs=surrogate halves, Mn=non-spacing combining marks.
+_BANNED_UNICODE_CATEGORIES: frozenset[str] = frozenset({"Cf", "Cc", "Cs", "Mn"})
 
 
 def _require_non_empty(value: str | None, field_name: str) -> tuple[bool, str]:
@@ -207,6 +232,11 @@ def _validate_id_shape(
       endpoints — CallRail 404s, but we shouldn't send the request).
     - Must not be just dots (those slip past `_safe_path`'s exact-match
       check when concatenated with a file extension like '.json').
+    - Must not contain bidi/zero-width/combining characters that would
+      flow through `_safe_path` (which only blocks ord<0x20 + 0x7f) and
+      end up percent-encoded into URLs / log lines / error envelopes.
+      Examples: U+202E RTL override, U+200B zero-width space, combining
+      diacritics. These can hide spoofed IDs in display contexts.
     - Optional: must start with the given prefix ('TRK', 'COM', etc.).
     """
     if "/" in value:
@@ -219,6 +249,16 @@ def _validate_id_shape(
     # 'trackers/...json', which isn't traversal but wastes an API call).
     if set(value.strip()) <= {"."}:
         return False, f"{field_name}={value!r} cannot consist only of dots."
+    # Reject bidi controls / zero-width / combining marks. These pass
+    # `_safe_path`'s control-char filter (which only blocks ord<0x20|0x7f)
+    # but cause display ambiguity — an ID like 'TRK\u202eABC' renders as
+    # 'TRKCBA' in many UIs, masking spoofed values in logs.
+    bad = [c for c in value if unicodedata.category(c) in _BANNED_UNICODE_CATEGORIES]
+    if bad:
+        return False, (
+            f"{field_name}={value!r} contains disallowed Unicode characters "
+            f"(category {unicodedata.category(bad[0])}: bidi/zero-width/combining)."
+        )
     if prefix and not value.startswith(prefix):
         return False, (
             f"{field_name}={value!r} must start with {prefix!r} "
@@ -792,7 +832,10 @@ def call_summary(
                 first_time += 1
             else:
                 repeat += 1
-            duration_total += c.get("duration") or 0
+            # Robust int coercion — match usage_summary's defense (CallRail
+            # currently returns int but shape changes shouldn't crash mid-loop).
+            with contextlib.suppress(TypeError, ValueError):
+                duration_total += int(float(c.get("duration") or 0))
             src = c.get("source") or "(none)"
             by_source[src] = by_source.get(src, 0) + 1
             sname = c.get("source_name") or "(none)"
@@ -1024,6 +1067,19 @@ def update_call(
             ok, msg = _require_non_empty(value, field)
             if not ok:
                 return _err_msg(msg)
+    # Length caps: prevent multi-MB request bodies.
+    if note is not None:
+        ok, msg = _validate_length(note, "note", _MAX_NOTE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if customer_name is not None:
+        ok, msg = _validate_length(customer_name, "customer_name", _MAX_CUSTOMER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
+        return _err_msg(
+            f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
+        )
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -1143,6 +1199,14 @@ def update_form_submission(
             ok, msg = _require_non_empty(value_, field)
             if not ok:
                 return _err_msg(msg)
+    if note is not None:
+        ok, msg = _validate_length(note, "note", _MAX_NOTE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
+        return _err_msg(
+            f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
+        )
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -1238,6 +1302,9 @@ def update_tag(
     ok, msg = _validate_id_shape(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
+    # CallRail tag IDs are numeric — fail-fast on alphabetic / mixed inputs.
+    if not _TAG_ID_RE.match(tag_id):
+        return _err_msg(f"tag_id={tag_id!r} must be numeric (CallRail tag IDs are integers).")
     if name is not None:
         ok, msg = _require_non_empty(name, "name")
         if not ok:
@@ -1269,6 +1336,8 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
     ok, msg = _validate_id_shape(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
+    if not _TAG_ID_RE.match(tag_id):
+        return _err_msg(f"tag_id={tag_id!r} must be numeric (CallRail tag IDs are integers).")
     try:
         aid = client.resolve_account_id(account_id)
         client.delete(f"a/{aid}/tags/{tag_id}.json")
@@ -1303,14 +1372,20 @@ def _is_toll_free(number: str | None) -> bool:
     Returns False for non-NANP numbers (international, shortcodes, etc.)
     rather than mis-classifying them as local — the cost model in
     `usage_summary` doesn't price non-NANP numbers correctly anyway.
+
+    Strips trailing extensions (`+18005551234x77`) before classification
+    so a toll-free with extension still bills correctly. Uses ASCII-only
+    digit detection (Devanagari etc. are NOT extracted).
     """
     if not number:
         return False
-    digits = "".join(c for c in number if c.isdigit())
-    # NANP is exactly 11 digits with a leading "1". Shortcodes (5-6 digits)
-    # and international numbers (varied length) won't match this and will
-    # return False — they're better handled separately upstream.
-    if len(digits) == 11 and digits[0] == "1":
+    # Strip extension dialing (RFC 3966): everything after 'x', ';ext=', or ','.
+    cleaned = re.split(r"[xX,;]", number, maxsplit=1)[0]
+    digits = "".join(c for c in cleaned if c in "0123456789")
+    # NANP is exactly 11 digits with a leading "1". Anything longer is
+    # likely international + extension noise; truncate to first 11 if it
+    # starts with "1" so toll-free with stripped junk still classifies.
+    if len(digits) >= 11 and digits[0] == "1":
         return digits[1:4] in {"800", "888", "877", "866", "855", "844", "833"}
     return False
 
@@ -1500,15 +1575,19 @@ def usage_summary(
             if residual:
                 # Sort by largest fractional remainder; adjust one cent at
                 # a time until residual is zero. Positive residual = bump
-                # up; negative = bump down.
+                # up; negative = bump down. Cycle through `remainders` if
+                # residual exceeds row count (defensive — current pricing
+                # math bounds residual to ~N cents, but float drift on
+                # huge accounts could exceed it).
                 remainders = sorted(
                     range(len(per_company)),
                     key=lambda i: abs(per_company[i]["_cost_unrounded"] * 100 - rounded_cents[i]),
                     reverse=True,
                 )
                 step = 1 if residual > 0 else -1
-                for idx in remainders[: abs(residual)]:
-                    rounded_cents[idx] += step
+                n = len(remainders)
+                for i in range(abs(residual)):
+                    rounded_cents[remainders[i % n]] += step
             for r, cents in zip(per_company, rounded_cents, strict=True):
                 r["estimated_cost_share"] = round(cents / 100.0, 2)
                 del r["_cost_unrounded"]
@@ -1611,8 +1690,13 @@ def call_eligibility_check(
             f"a/{aid}/calls/{call_id}.json",
             {
                 "fields": (
+                    # `source` is the CallRail-internal slug (e.g. 'google_paid',
+                    # 'bing_paid'). More reliable than `source_name` for source
+                    # detection — user-facing tracker names can mislead
+                    # (e.g. "Bing Ads (migrated from Google)" would substring-
+                    # match as Google on source_name but is clearly Bing).
                     "gclid,utm_source,utm_medium,duration,answered,"
-                    "source_name,first_call,landing_page_url"
+                    "source,source_name,first_call,landing_page_url"
                 )
             },
         )
@@ -1621,6 +1705,7 @@ def call_eligibility_check(
 
         gclid = call_data.get("gclid")
         utm_source = (call_data.get("utm_source") or "").lower()
+        source_slug = (call_data.get("source") or "").lower()
         source_name = (call_data.get("source_name") or "").lower()
         # Robust int coercion — CallRail returns int but defend against
         # future schema changes (string/float).
@@ -1637,18 +1722,22 @@ def call_eligibility_check(
             answered = bool(raw_answered)
 
         # Heuristic: Google source = utm_source=google (GMB + paid) OR
-        # source_name contains 'google' (CallRail named sources like
-        # 'GMB ...', 'Google Ads Assets') OR has gclid. The gclid signal
-        # is honest: "gclid" stands for Google Click ID — it can only be
-        # minted by Google Ads. So presence proves Google origin even
-        # when CallRail's source_name is generic (e.g. "Website Pool"
-        # for a DNI session that happens to have served a Google Ads
-        # visitor). The redundancy with `has_gclid` is intentional —
-        # consumers may want to know "is this a Google call at all"
-        # independent of "did Google's tracking specifically capture it".
+        # CallRail internal `source` slug starts with 'google_' (e.g.
+        # 'google_paid', 'google_organic', 'google_my_business') OR has
+        # gclid. The gclid signal is honest: "gclid" stands for Google
+        # Click ID — it can only be minted by Google Ads. So presence
+        # proves Google origin even when CallRail's source_name is
+        # generic (e.g. "Website Pool" for a DNI session that happens
+        # to have served a Google Ads visitor).
+        #
+        # We deliberately use `source` (CallRail's internal slug) NOT
+        # `source_name` (user-editable display string) — a tracker named
+        # "Bing Ads (Google legacy import)" would false-positive on
+        # source_name substring match but is clearly Bing.
         is_google = (
             utm_source == "google"
-            or "google" in source_name
+            or source_slug.startswith("google_")
+            or source_slug == "google_my_business"
             or bool(gclid)
         )
 
@@ -1698,6 +1787,7 @@ def call_eligibility_check(
                 "answered": answered,
                 "gclid": gclid,
                 "utm_source": call_data.get("utm_source"),
+                "source": call_data.get("source"),
                 "source_name": call_data.get("source_name"),
                 "landing_page_url": call_data.get("landing_page_url"),
                 "first_call": call_data.get("first_call"),

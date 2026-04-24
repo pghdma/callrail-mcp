@@ -129,16 +129,21 @@ def _load_api_key() -> str:
     if key_path.exists():
         # Warn (don't error) on lax permissions — the API key is a secret
         # and credential files should be mode 600 (owner-read-only).
-        try:
-            mode = key_path.stat().st_mode
-            if mode & 0o077:
-                logger.warning(
-                    "CallRail API key file %s has lax permissions (mode %o); "
-                    "recommended: chmod 600 %s",
-                    key_path, mode & 0o777, key_path,
-                )
-        except OSError:
-            pass  # Permission check is best-effort.
+        # Skip on Windows: NTFS doesn't have POSIX mode bits, and
+        # `Path.stat().st_mode` returns synthetic values (typically 0o666)
+        # that would trigger this warning on every load. NTFS permissions
+        # are managed via ACLs, not chmod.
+        if os.name != "nt":
+            try:
+                mode = key_path.stat().st_mode
+                if mode & 0o077:
+                    logger.warning(
+                        "CallRail API key file %s has lax permissions (mode %o); "
+                        "recommended: chmod 600 %s",
+                        key_path, mode & 0o777, key_path,
+                    )
+            except OSError:
+                pass  # Permission check is best-effort.
         return key_path.read_text().strip()
     raise CallRailError(
         "No CallRail API key found. Set CALLRAIL_API_KEY env var or place the "
@@ -184,7 +189,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.4.3 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.4.4 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -373,7 +378,13 @@ class CallRailClient:
         accounts = data.get("accounts") or data.get("agencies") or []
         if not accounts:
             raise CallRailError("No CallRail accounts accessible with this API key")
-        first_id = accounts[0].get("id")
+        first = accounts[0]
+        if not isinstance(first, dict):
+            raise CallRailError(
+                f"Unexpected accounts[0] type from CallRail: "
+                f"{type(first).__name__}; expected dict."
+            )
+        first_id = first.get("id")
         if not isinstance(first_id, str):
             raise CallRailError(
                 f"Unexpected account.id type from CallRail: {type(first_id).__name__}"

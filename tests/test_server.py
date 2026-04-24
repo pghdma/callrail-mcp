@@ -1662,6 +1662,183 @@ def test_search_calls_caps_match_count(server_with_mock_client) -> None:
     assert out["match_cap"] == 500
 
 
+# ============================================================
+# v0.4.4 — Audit pass 10 fixes (Unicode, is_google, extension parsing,
+#          length caps, tag_id format, float days)
+# ============================================================
+
+@pytest.mark.parametrize("evil_id", [
+    "TRK\u202eABC",     # RTL override
+    "TRK\u200bABC",     # Zero-width space
+    "TRK\u200dABC",     # Zero-width joiner
+    "TRK\u00adABC",     # Soft hyphen (Cf)
+    "TRKa\u0301bc",     # Combining acute accent (Mn)
+])
+def test_v044_id_shape_rejects_unicode_invisible_chars(
+    evil_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bidi controls / zero-width / combining marks pass _safe_path's
+    control-char filter (only ord<0x20|0x7f) but cause display ambiguity
+    in logs. Now rejected at the validator level."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.get_tracker(tracker_id=evil_id))
+    assert out["error"] is True
+    assert "Unicode" in out["message"] or "disallowed" in out["message"]
+
+
+def test_v044_area_code_rejects_devanagari_digits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ASCII-only regex (`[0-9]`) replaces `\\d` to block Unicode digits."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_tracker(
+        name="x", company_id="COM1", destination_number="+14125551234",
+        confirm_billing=True, area_code="\u096a\u0967\u0968",  # Devanagari "412"
+    ))
+    assert out["error"] is True
+    assert "area_code" in out["message"]
+
+
+def test_v044_phone_rejects_devanagari_digits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_tracker(
+        name="x", company_id="COM1",
+        destination_number="\u096a\u0967\u0968\u096b\u096b\u096b\u0967\u0968\u0969\u096a",
+        confirm_billing=True, area_code="412",
+    ))
+    assert out["error"] is True
+
+
+def test_v044_is_toll_free_handles_extension() -> None:
+    """v0.4.4 fix: NANP toll-free with `+1...x77` extension was
+    mis-classified as not-toll-free."""
+    from callrail_mcp.server import _is_toll_free
+    assert _is_toll_free("+18005551234x77") is True
+    assert _is_toll_free("+18005551234,77") is True
+    assert _is_toll_free("+18005551234;ext=77") is True
+    # Local with extension still local.
+    assert _is_toll_free("+14125551234x123") is False
+
+
+def test_v044_validate_window_rejects_non_integer_float() -> None:
+    """v0.4.4 fix: days=1.5 was silently truncated to 1 by int()."""
+    ok, msg = _validate_window(1.5, None, None)
+    assert not ok
+    assert "whole number" in msg
+    # Whole-number float still ok.
+    ok, _ = _validate_window(7.0, None, None)
+    assert ok
+
+
+def test_v044_update_call_rejects_oversize_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.4 fix: prevent multi-MB note bodies from passing through."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_call(call_id="CAL_x", note="A" * 4001))
+    assert out["error"] is True
+    assert "note" in out["message"].lower()
+
+
+def test_v044_update_call_rejects_oversize_tags_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_call(call_id="CAL_x", tags=["x"] * 101))
+    assert out["error"] is True
+    assert "tags" in out["message"].lower()
+
+
+def test_v044_update_form_submission_rejects_oversize_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_form_submission(
+        submission_id="FOR_x", note="A" * 4001,
+    ))
+    assert out["error"] is True
+
+
+def test_v044_tag_id_must_be_numeric(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.4 fix: CallRail tag IDs are numeric. Reject 'hello' etc."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_tag(tag_id="hello", name="x"))
+    assert out["error"] is True
+    assert "numeric" in out["message"]
+    out = json.loads(server_mod.delete_tag(tag_id="abc123"))
+    assert out["error"] is True
+
+
+def test_v044_call_eligibility_uses_source_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.4 fix: `is_google` now uses CallRail's internal `source` slug
+    (e.g. 'google_paid'), not the user-editable `source_name`. Previously
+    a Bing tracker named 'Bing Ads (Google legacy import)' would have
+    been classified as Google by source_name substring match."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    responses_lib = pytest.importorskip("responses")
+    with responses_lib.RequestsMock() as rsps:
+        rsps.add(
+            responses_lib.GET,
+            "https://api.callrail.com/v3/a.json",
+            json={"accounts": [{"id": "ACC1"}]},
+            status=200,
+        )
+        rsps.add(
+            responses_lib.GET,
+            "https://api.callrail.com/v3/a/ACC1/calls/CAL_BING.json",
+            json={
+                "gclid": None,
+                "utm_source": None,
+                "duration": 90,
+                "answered": True,
+                "source": "bing_paid",
+                "source_name": "Bing Ads (Google legacy import)",
+            },
+            status=200,
+        )
+        out = json.loads(server_mod.call_eligibility_check(call_id="CAL_BING"))
+        assert out["checks"]["is_google_source"] is False
+        assert out["call_facts"]["source"] == "bing_paid"
+
+
+@responses.activate
+def test_v044_call_eligibility_google_paid_detected(server_with_mock_client) -> None:
+    """v0.4.4 sanity: source='google_paid' (no gclid) still detected."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_GP.json",
+        json={
+            "gclid": None,
+            "duration": 90,
+            "answered": True,
+            "source": "google_paid",
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_GP"))
+    assert out["checks"]["is_google_source"] is True
+
+
+def test_v044_err_handles_bytes_body() -> None:
+    """v0.4.4 defensive: if body is ever bytes (not str), decode."""
+    from callrail_mcp.client import CallRailError
+    e = CallRailError("oops", status=500, body=b"binary stuff \xff")
+    out = json.loads(server_mod._err(e))
+    # Should not raise; body should be decoded with replacement chars.
+    assert isinstance(out["body"], str)
+
+
 @responses.activate
 def test_v043_paginate_handles_missing_total_pages(
     monkeypatch: pytest.MonkeyPatch,

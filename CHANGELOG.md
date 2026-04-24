@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-04-24
+
+### Fixed (audit pass 10 — adversarial fuzzing + cross-tool consistency)
+
+3 parallel audit angles (own-code review, adversarial input fuzzing,
+cross-tool consistency) surfaced 20+ findings. Fixed the 13
+highest-impact.
+
+#### HIGH
+- **Unicode bypass in IDs**: bidi/zero-width/combining chars (RTL
+  override `\u202e`, ZWS `\u200b`, combining marks) passed
+  `_validate_id_shape` and `_safe_path` (which only blocks
+  `ord<0x20|0x7f`). They flowed through to URL paths + log lines +
+  error envelopes where they mask spoofed IDs in display contexts.
+  Now rejected at the validator with category-based check
+  (`unicodedata.category()`).
+- **`call_eligibility_check` was reading the wrong field for source
+  detection**. Used `source_name` (user-editable display string,
+  e.g. "Bing Ads (Google legacy import)") for substring match —
+  would falsely classify Bing calls as Google. Now uses CallRail's
+  internal `source` slug (e.g. `google_paid`, `bing_paid`).
+- **`_is_toll_free` mis-classified NANP toll-free with extensions**.
+  `+18005551234x77` was being counted as not-toll-free because the
+  `x77` made the digit count != 11. Now strips RFC 3966 extensions
+  (`x`, `,`, `;ext=`) before classification.
+
+#### MEDIUM
+- **Devanagari (and other Unicode) digits accepted in numeric
+  validators**. `^\d{3}$` matches `\u096a\u0967\u0968` (Devanagari
+  "412"). Replaced all `\d` with `[0-9]` for ASCII-only enforcement
+  in date / phone / area-code regexes.
+- **Tag IDs accepted any string** despite being numeric in CallRail.
+  `update_tag(tag_id="hello world")` now fails fast.
+- **Free-text fields had no length caps**. `update_call(note="X"*1MB)`
+  would have sent multi-MB request bodies. Added `_MAX_NOTE_LEN=4000`,
+  `_MAX_TAGS_PER_REQUEST=100`, `_MAX_CUSTOMER_NAME_LEN=200`.
+- **`_validate_window` silently truncated float `days`**. `days=1.5`
+  → `int(1.5)` = 1 (user expected ~36h). Now rejects non-integer
+  floats explicitly.
+- **`call_summary` didn't coerce duration**. Would `TypeError` if
+  CallRail ever shipped string durations. Now matches `usage_summary`
+  defense (`int(float(x))` with `contextlib.suppress`).
+
+#### DEFENSIVE
+- `_err()` now decodes bytes bodies (was: would crash if a future
+  contributor wired bytes through CallRailError).
+- `resolve_account_id()` now type-checks `accounts[0]` is a dict
+  before `.get()` (was: AttributeError if CallRail returned a list
+  of strings).
+- API key file permission warning skipped on Windows (NTFS doesn't
+  have POSIX mode bits — warning fired every load).
+- Largest-remainder rounding loop cycles through indices when
+  `abs(residual) > len(per_company)` (defensive against future
+  pricing arithmetic that might exceed N cents drift).
+
+### Added — tests
+
+- 16 new unit tests (204 → 220 total):
+  - 5-row parametrized matrix on Unicode-invisible-char rejection in IDs
+  - Devanagari digit rejection in area_code + phone
+  - Toll-free with extension classification
+  - Float-`days` non-integer rejection
+  - Oversize note / tags / customer_name caps for `update_call` +
+    `update_form_submission`
+  - Tag ID numeric validation
+  - `is_google` source-slug detection (Bing-named-Google rejected;
+    `google_paid`-no-gclid accepted)
+  - `_err` bytes-body handling
+
 ## [0.4.3] - 2026-04-24
 
 ### Fixed (audit pass 9 — meta-audit on what passes 1-8 missed)
