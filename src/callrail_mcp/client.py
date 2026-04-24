@@ -31,6 +31,20 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_PER_PAGE = 100
 MAX_PER_PAGE = 250
 
+# Discovered empirically by exhaustive testing against the v3 tags endpoint
+# (the docs don't enumerate this). Any other value returns
+# 400 "Color is not included in the list".
+VALID_TAG_COLORS: tuple[str, ...] = (
+    "red1", "red2",
+    "orange1",
+    "yellow1",
+    "green1",
+    "blue1",
+    "purple1",
+    "pink1",
+    "gray1", "gray2",
+)
+
 
 class CallRailError(RuntimeError):
     """Raised when the CallRail API returns an error we cannot retry past."""
@@ -85,7 +99,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.2.0 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.2.1 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 

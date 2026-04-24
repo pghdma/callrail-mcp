@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-24
+
+### Fixed
+- `create_tag` and `update_tag`: documented color values were wrong. CallRail's API
+  rejects all the named colors I'd listed (`red`, `blue`, etc.) with `400 "Color is
+  not included in the list"`. The actual valid set, discovered by exhaustive testing
+  against the live API, is exposed as `client.VALID_TAG_COLORS`:
+  `red1, red2, orange1, yellow1, green1, blue1, purple1, pink1, gray1, gray2`.
+- Both tools now validate the color client-side before hitting the API and return a
+  clean error envelope listing the valid options if you pass something else.
+- Docstrings updated.
+
 ## [0.2.0] - 2026-04-24
 
 ### Added

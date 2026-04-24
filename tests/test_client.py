@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import responses
 
-from callrail_mcp.client import CallRailClient, CallRailError
+from callrail_mcp.client import VALID_TAG_COLORS, CallRailClient, CallRailError
 
 
 @pytest.fixture
@@ -196,3 +196,19 @@ def test_post_retries_on_429(client: CallRailClient) -> None:
     data = client.post("a/ACC1/tags.json", {"name": "x"})
     assert data["id"] == "TAG_OK"
     assert len(responses.calls) == 2
+
+
+# ---- tag color enum ----
+
+def test_valid_tag_colors_contains_known_values() -> None:
+    """The set discovered by exhaustive API testing — guards against accidental
+    edits that would remove a real value or accept an unsupported one."""
+    expected = {"red1", "red2", "orange1", "yellow1", "green1",
+                "blue1", "purple1", "pink1", "gray1", "gray2"}
+    assert set(VALID_TAG_COLORS) == expected
+
+
+def test_valid_tag_colors_excludes_common_invalid_values() -> None:
+    """Plain color names without numbers are NOT valid in CallRail's API."""
+    for invalid in ("red", "blue", "green", "gray", "black", "white", "#FF0000", "brown1"):
+        assert invalid not in VALID_TAG_COLORS
