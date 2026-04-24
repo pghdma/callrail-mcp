@@ -15,6 +15,7 @@ Run standalone for stdio transport:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -79,13 +80,24 @@ def _validate_date(value: str, field_name: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _date_window(days: int | None, start_date: str | None, end_date: str | None) -> dict[str, str]:
+def _date_window(
+    days: int | None,
+    start_date: str | None,
+    end_date: str | None,
+    tz: str = "UTC",
+) -> dict[str, str]:
     """Produce start_date/end_date query params (YYYY-MM-DD).
 
     Behavior:
     - Explicit dates always win over `days`.
     - `days <= 0` is treated as "no window" only if the caller passes None or 0
       explicitly; the calling tool is responsible for validating positive values.
+    - `tz` is the IANA timezone for "today" — defaults to UTC. Pass the
+      account's `time_zone` (e.g. "America/New_York") to align day
+      boundaries with the user's business day rather than UTC midnight.
+      A user in PT asking for `days=1` at 5pm PT (= 1am next-day UTC)
+      with tz="UTC" gets two calendar days; with tz="America/Los_Angeles"
+      gets the actual one PT day they meant.
 
     Defensively coerces string `days` (e.g. `"7"` from MCP clients sending
     loose JSON) to int. `_validate_window` does the same coercion but only
@@ -105,11 +117,33 @@ def _date_window(days: int | None, start_date: str | None, end_date: str | None)
     if end_date:
         out["end_date"] = end_date
     if days and days > 0 and "start_date" not in out:
-        end = datetime.now(timezone.utc).date()
+        try:
+            from zoneinfo import ZoneInfo
+            tzinfo: Any = ZoneInfo(tz) if tz and tz != "UTC" else timezone.utc
+        except Exception:
+            # Bad tz string → fall back to UTC rather than crash.
+            tzinfo = timezone.utc
+        end = datetime.now(tzinfo).date()
         start = end - timedelta(days=days)
         out["start_date"] = start.isoformat()
         out["end_date"] = end.isoformat()
     return out
+
+
+def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
+    """Pick the account's IANA time_zone from a list of active company records.
+
+    CallRail returns `time_zone` on each company; in practice all companies
+    in an agency share the same TZ. We sample the first active company.
+    Returns "UTC" on any miss so callers always get a usable string.
+
+    Reuses the already-fetched companies list — no extra API call.
+    """
+    for c in active_companies:
+        tz = c.get("time_zone")
+        if isinstance(tz, str) and tz:
+            return tz
+    return "UTC"
 
 
 def _validate_window(
@@ -1514,6 +1548,7 @@ def usage_summary(
             )
         )
         active_companies = [c for c in companies if c.get("status") == "active"]
+        account_tz = _pick_account_tz(active_companies)
 
         # 2. Pull active trackers per company. Numbers/pool_size aggregate
         # the count of provisioned numbers (CallRail bills per number, not
@@ -1522,7 +1557,7 @@ def usage_summary(
         # Both use paginate() — a busy client easily exceeds 250 calls in
         # a 30-day window (Malick at ~800 minutes was definitely truncated
         # before we wired up pagination).
-        date_params = _date_window(days, start_date, end_date)
+        date_params = _date_window(days, start_date, end_date, tz=account_tz)
         per_company: list[dict[str, Any]] = []
         partial_failures: list[dict[str, Any]] = []
 
@@ -1904,6 +1939,528 @@ def call_eligibility_check(
                 "lacking a gclid here doesn't mean Google didn't count them.",
             ],
         })
+    except CallRailError as e:
+        return _err(e)
+
+
+# ============================================================
+# v0.5.0 — agency workflow tools (period comparison, bulk update, spam)
+# ============================================================
+
+@mcp.tool()
+def compare_periods(
+    days: int = 30,
+    account_id: str | None = None,
+) -> str:
+    """Compare current N-day window vs the previous N-day window.
+
+    Returns per-company minute / call deltas + agency-wide totals. Useful
+    for "is Malick growing?", "did we lose Stewart traffic this month?",
+    catching invoice surprises before they hit.
+
+    Args:
+        days: Window length on each side (default 30 = roughly one cycle).
+            Cap: 365 (don't ask for "5-year delta" — likely a typo).
+        account_id: Auto-resolves if omitted.
+
+    Returns: A breakdown showing current vs previous totals, % deltas,
+    and per-company growth/shrink. Sorted by absolute minute change.
+
+    Implementation: pulls call data for both windows in one tool call.
+    Tracker counts use current-snapshot for both periods (CallRail doesn't
+    expose historical tracker counts) — only minute deltas reflect actual
+    period-over-period change.
+    """
+    # Use the shared validator (handles bool rejection, string coercion,
+    # 36500-cap, etc.) then layer compare_periods's own 365 ceiling.
+    ok, msg = _validate_window(days, None, None, require_window=True)
+    if not ok:
+        return _err_msg(msg)
+    if not isinstance(days, int) or days > 365:
+        # `_validate_window` already coerced strings/floats to int and
+        # checked >=1 + <=36500. We only need to enforce the tighter
+        # 365 cap that's specific to compare_periods (year-over-year is
+        # the largest meaningful window for delta analysis).
+        return _err_msg(
+            f"days={days} exceeds compare_periods cap of 365 (one year). "
+            f"For longer windows, use usage_summary on each period separately."
+        )
+    try:
+        aid = client.resolve_account_id(account_id)
+        companies = list(
+            client.paginate(
+                f"a/{aid}/companies.json",
+                {"per_page": 250},
+                items_key="companies",
+            )
+        )
+        active_companies = [c for c in companies if c.get("status") == "active"]
+        account_tz = _pick_account_tz(active_companies)
+
+        # Current window: today minus N days → today.
+        # Previous window: today minus 2N days → today minus N days - 1.
+        # CallRail's start_date/end_date are BOTH inclusive — without the
+        # `-timedelta(days=1)` on prev_end, the boundary day would appear
+        # in both windows and double-count (1 day of overlap on N=30 = 3.3%
+        # error in deltas).
+        try:
+            from zoneinfo import ZoneInfo
+            tzinfo: Any = ZoneInfo(account_tz) if account_tz != "UTC" else timezone.utc
+        except Exception:
+            tzinfo = timezone.utc
+        today = datetime.now(tzinfo).date()
+        cur_end = today
+        cur_start = today - timedelta(days=days)
+        prev_end = cur_start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=days)
+
+        def _aggregate(window_start: str, window_end: str) -> dict[str, Any]:
+            """Return {total_minutes, total_calls, by_company: {cid: {minutes, calls, name}}}."""
+            agg_by_company: dict[str, dict[str, Any]] = {}
+            for c in active_companies:
+                cid = c.get("id")
+                if not cid:
+                    continue
+                params = {
+                    "company_id": cid,
+                    "per_page": 250,
+                    "start_date": window_start,
+                    "end_date": window_end,
+                    "fields": "duration",
+                }
+                total_seconds = 0
+                call_count = 0
+                try:
+                    for call in client.paginate(
+                        f"a/{aid}/calls.json", params, items_key="calls"
+                    ):
+                        call_count += 1
+                        raw_duration = call.get("duration") or 0
+                        with contextlib.suppress(TypeError, ValueError):
+                            total_seconds += int(float(raw_duration))
+                except CallRailError as e:
+                    logger.warning("compare_periods: %s failed for company %s", e, cid)
+                agg_by_company[cid] = {
+                    "name": c.get("name", "(unnamed)"),
+                    "minutes": round(total_seconds / 60.0, 1),
+                    "calls": call_count,
+                }
+            return {
+                "total_minutes": round(sum(r["minutes"] for r in agg_by_company.values()), 1),
+                "total_calls": sum(r["calls"] for r in agg_by_company.values()),
+                "by_company": agg_by_company,
+            }
+
+        cur = _aggregate(cur_start.isoformat(), cur_end.isoformat())
+        prev = _aggregate(prev_start.isoformat(), prev_end.isoformat())
+
+        def _pct(now: float, then: float) -> float | None:
+            if then == 0:
+                return None  # avoid div-by-zero; surfaced as null
+            return round((now - then) / then * 100, 1)
+
+        company_deltas = []
+        for cid, cur_row in cur["by_company"].items():
+            prev_row = prev["by_company"].get(cid, {"minutes": 0.0, "calls": 0})
+            company_deltas.append({
+                "company_id": cid,
+                "name": cur_row["name"],
+                "current_minutes": cur_row["minutes"],
+                "previous_minutes": prev_row["minutes"],
+                "minutes_delta": round(cur_row["minutes"] - prev_row["minutes"], 1),
+                "minutes_pct_change": _pct(cur_row["minutes"], prev_row["minutes"]),
+                "current_calls": cur_row["calls"],
+                "previous_calls": prev_row["calls"],
+                "calls_delta": cur_row["calls"] - prev_row["calls"],
+            })
+        # Sort by largest absolute minute change (biggest mover on top).
+        company_deltas.sort(key=lambda r: abs(r["minutes_delta"]), reverse=True)
+
+        return _ok({
+            "window_days": days,
+            "timezone": account_tz,
+            "current": {
+                "start_date": cur_start.isoformat(),
+                "end_date": cur_end.isoformat(),
+                "total_minutes": cur["total_minutes"],
+                "total_calls": cur["total_calls"],
+            },
+            "previous": {
+                "start_date": prev_start.isoformat(),
+                "end_date": prev_end.isoformat(),
+                "total_minutes": prev["total_minutes"],
+                "total_calls": prev["total_calls"],
+            },
+            "agency_deltas": {
+                "minutes_delta": round(cur["total_minutes"] - prev["total_minutes"], 1),
+                "minutes_pct_change": _pct(cur["total_minutes"], prev["total_minutes"]),
+                "calls_delta": cur["total_calls"] - prev["total_calls"],
+            },
+            "by_company": company_deltas,
+            "biggest_mover": company_deltas[0]["name"] if company_deltas else None,
+        })
+    except CallRailError as e:
+        return _err(e)
+
+
+# Cap on bulk operations to prevent accidentally tagging 10k calls.
+_BULK_UPDATE_CAP = 500
+
+
+@mcp.tool()
+def bulk_update_calls(
+    company_id: str | None = None,
+    days: int = 7,
+    source: str | None = None,
+    answered: str | None = None,
+    set_tags_add: list[str] | None = None,
+    set_note: str | None = None,
+    set_lead_status: str | None = None,
+    set_spam: bool | None = None,
+    dry_run: bool = True,
+    account_id: str | None = None,
+) -> str:
+    """Apply the same update to every call matching a filter.
+
+    Useful for: "tag every Bing call this month as low-priority",
+    "mark all <30s unanswered calls from this number as spam",
+    "add a note to every call from a specific landing page". Replaces
+    dozens of sequential `update_call` invocations with one tool call.
+
+    **Safety:** `dry_run=True` by default — returns a preview of which
+    calls WOULD be updated without actually writing. Pass `dry_run=False`
+    to commit. Hard cap of 500 calls per invocation to prevent runaway
+    bulk operations.
+
+    Args:
+        company_id, days, source, answered: filter — same semantics as
+            `list_calls`. At least one must be provided to avoid
+            "update everything ever".
+        set_tags_add: tag names to ADD to each matched call (preserves
+            existing tags). Mutually compatible with other set_* fields.
+        set_note: note text to set on each matched call (replaces existing).
+        set_lead_status: e.g. 'good_lead', 'not_a_lead'.
+        set_spam: True to mark spam, False to unmark.
+        dry_run: If True (default), return preview only. False = commit.
+        account_id: Auto-resolves if omitted.
+
+    Returns:
+        - If dry_run: `{"matched": N, "would_update": [...]}`
+        - Else: `{"matched": N, "updated": M, "failed": [...]}` per call
+    """
+    # Require at least one filter to avoid "update every call ever".
+    if not company_id and not source and not answered and (days is None or days < 1):
+        return _err_msg(
+            "bulk_update_calls requires at least one filter "
+            "(company_id, source, answered, or days>=1) to avoid "
+            "accidentally targeting every call in the account."
+        )
+    # Validate `answered` — CallRail accepts only "true"/"false" strings.
+    # A bad value (e.g. answered="no") would be silently ignored by CallRail,
+    # returning ALL calls, which then get bulk-updated — wrong.
+    if answered is not None and answered not in ("true", "false"):
+        return _err_msg(
+            f"answered={answered!r} must be 'true' or 'false' (string) or None."
+        )
+    # Require at least one update field.
+    update_fields = [
+        ("tags_add", set_tags_add),
+        ("note", set_note),
+        ("lead_status", set_lead_status),
+        ("spam", set_spam),
+    ]
+    if not any(v is not None for _, v in update_fields):
+        return _err_msg(
+            "bulk_update_calls requires at least one set_* parameter "
+            "(set_tags_add, set_note, set_lead_status, or set_spam)."
+        )
+    if set_note is not None:
+        ok, msg = _require_non_empty(set_note, "set_note")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_length(set_note, "set_note", _MAX_NOTE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if set_lead_status is not None:
+        ok, msg = _require_non_empty(set_lead_status, "set_lead_status")
+        if not ok:
+            return _err_msg(msg)
+    if set_tags_add is not None:
+        cleaned = _clean_tag_list(set_tags_add)
+        if not cleaned:
+            return _err_msg("set_tags_add is empty (or only whitespace).")
+        if len(cleaned) > _MAX_TAGS_PER_REQUEST:
+            return _err_msg(
+                f"set_tags_add length {len(cleaned)} exceeds max {_MAX_TAGS_PER_REQUEST}."
+            )
+        set_tags_add = cleaned
+    ok, msg = _validate_window(days, None, None)
+    if not ok:
+        return _err_msg(msg)
+
+    try:
+        aid = client.resolve_account_id(account_id)
+        # List matching calls (paginated, capped).
+        params: dict[str, Any] = {"per_page": 250, **_date_window(days, None, None)}
+        if company_id:
+            params["company_id"] = company_id
+        if source:
+            params["source"] = source
+        if answered is not None:
+            params["answered"] = answered
+        params["fields"] = "tags,source,duration,answered,customer_name,first_call"
+        matched: list[dict[str, Any]] = []
+        # Track whether we broke out due to cap so we can surface
+        # "there are more" to the caller (silent truncation risk).
+        truncated_at_cap = False
+        for call in client.paginate(f"a/{aid}/calls.json", params, items_key="calls"):
+            if len(matched) >= _BULK_UPDATE_CAP:
+                truncated_at_cap = True
+                break
+            matched.append(call)
+
+        if dry_run:
+            return _ok({
+                "dry_run": True,
+                "matched": len(matched),
+                "cap": _BULK_UPDATE_CAP,
+                "truncated_at_cap": truncated_at_cap,
+                "hint": (
+                    f"Filter matched >= {_BULK_UPDATE_CAP} calls; additional "
+                    f"matches were NOT loaded. Narrow the filter or run "
+                    f"multiple passes."
+                ) if truncated_at_cap else None,
+                "would_update_calls": [
+                    {
+                        "id": c.get("id"),
+                        "source": c.get("source"),
+                        "duration": c.get("duration"),
+                        "answered": c.get("answered"),
+                        "customer_name": c.get("customer_name"),
+                        "current_tags": [t.get("name") if isinstance(t, dict) else t for t in (c.get("tags") or [])],
+                    }
+                    for c in matched
+                ],
+                "set_fields": {
+                    "tags_add": set_tags_add,
+                    "note": set_note,
+                    "lead_status": set_lead_status,
+                    "spam": set_spam,
+                },
+                "next_step": "If preview looks right, re-run with dry_run=False to commit.",
+            })
+
+        # Commit phase.
+        updated = 0
+        failures: list[dict[str, Any]] = []
+        for c in matched:
+            cid = c.get("id")
+            if not cid:
+                continue
+            try:
+                # Build merged tag list if we're adding tags.
+                if set_tags_add is not None:
+                    existing_names_raw = [
+                        t.get("name") if isinstance(t, dict) else t
+                        for t in (c.get("tags") or [])
+                    ]
+                    # Drop any None / non-string entries that snuck in
+                    # via missing tag.name in CallRail responses.
+                    existing_names: list[str] = [
+                        n for n in existing_names_raw if isinstance(n, str)
+                    ]
+                    merged_tags: list[str] | None = list(
+                        dict.fromkeys(existing_names + set_tags_add)
+                    )
+                else:
+                    merged_tags = None
+
+                body: dict[str, Any] = {}
+                if merged_tags is not None:
+                    body["tags"] = merged_tags
+                if set_note is not None:
+                    body["note"] = set_note
+                if set_lead_status is not None:
+                    body["lead_status"] = set_lead_status
+                if set_spam is not None:
+                    body["spam"] = set_spam
+                client.put(f"a/{aid}/calls/{cid}.json", body)
+                updated += 1
+            except CallRailError as e:
+                failures.append({"call_id": cid, "error": str(e), "status": e.status})
+
+        return _ok({
+            "dry_run": False,
+            "matched": len(matched),
+            "updated": updated,
+            "failed_count": len(failures),
+            "failures": failures,
+            "truncated_at_cap": truncated_at_cap,
+            "hint": (
+                f"Filter matched >= {_BULK_UPDATE_CAP} calls; only the "
+                f"first {_BULK_UPDATE_CAP} were updated. Additional "
+                f"matches remain untouched. Narrow the filter or run again."
+            ) if truncated_at_cap else None,
+        })
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def spam_detector(
+    company_id: str | None = None,
+    days: int = 30,
+    auto_tag: bool = False,
+    tag_name: str = "auto_detected_spam",
+    account_id: str | None = None,
+) -> str:
+    """Heuristically identify likely-spam calls and (optionally) tag them.
+
+    Spam scoring (additive):
+      +2 if duration < 10 seconds
+      +1 if not answered
+      +1 if first_call AND duration < 30 seconds
+      +1 if same caller appears >=3 times in window (likely auto-dialer)
+    A call scoring >= 3 is flagged as likely spam.
+
+    Args:
+        company_id: Restrict to one company (recommended).
+        days: Lookback window (1-90 typical).
+        auto_tag: If True, ADD `tag_name` to each likely-spam call after
+            the scan. Default False (preview only). Note: we deliberately
+            do NOT mark calls as spam=True automatically — CallRail
+            HIDES spam-flagged calls from default GET endpoints, so
+            self-reviewing them later becomes painful. Tag first, manually
+            spam-flag if confirmed.
+        tag_name: The tag to add when auto_tag=True. Default
+            'auto_detected_spam'. Auto-creates the tag at company level
+            if it doesn't exist (CallRail's behavior).
+        account_id: Auto-resolves if omitted.
+
+    Returns:
+        - score breakdown by call
+        - histogram of caller phone numbers (so you can spot a single
+          dialer hammering you)
+        - if auto_tag: count tagged + failures
+    """
+    # require_window=True: without it, days=0/None falls back to all-time
+    # scan, then auto-tagging would touch every spam-looking call ever.
+    ok, msg = _validate_window(days, None, None, require_window=True)
+    if not ok:
+        return _err_msg(msg)
+    # auto_tag without company_id would tag spam across EVERY company in
+    # the account in one call. Force the user to scope explicitly.
+    if auto_tag and not company_id:
+        return _err_msg(
+            "auto_tag=True requires company_id to scope the operation. "
+            "Run a preview first (auto_tag=False, no company_id) if you want "
+            "to see which companies have spam, then re-run with company_id."
+        )
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {
+            "per_page": 250,
+            "fields": "duration,answered,customer_phone_number,first_call,source,customer_name",
+            **_date_window(days, None, None),
+        }
+        if company_id:
+            params["company_id"] = company_id
+        all_calls = list(client.paginate(f"a/{aid}/calls.json", params, items_key="calls"))
+
+        # Caller frequency (from-number → count).
+        caller_counts: dict[str, int] = {}
+        for c in all_calls:
+            num = c.get("customer_phone_number") or ""
+            if num:
+                caller_counts[num] = caller_counts.get(num, 0) + 1
+
+        # Score each call.
+        scored: list[dict[str, Any]] = []
+        for c in all_calls:
+            try:
+                duration = int(float(c.get("duration") or 0))
+            except (TypeError, ValueError):
+                duration = 0
+            answered = bool(c.get("answered"))
+            first_call = bool(c.get("first_call"))
+            num = c.get("customer_phone_number") or ""
+            score = 0
+            reasons: list[str] = []
+            if duration < 10:
+                score += 2
+                reasons.append(f"very short ({duration}s)")
+            if not answered:
+                score += 1
+                reasons.append("not answered")
+            if first_call and duration < 30:
+                score += 1
+                reasons.append("first-time short call")
+            if num and caller_counts.get(num, 0) >= 3:
+                score += 1
+                reasons.append(f"caller appeared {caller_counts[num]}× in window")
+            scored.append({
+                "call_id": c.get("id"),
+                "score": score,
+                "reasons": reasons,
+                "duration": duration,
+                "answered": answered,
+                "customer_phone_number": num,
+                "customer_name": c.get("customer_name"),
+                "source": c.get("source"),
+            })
+
+        likely_spam = [s for s in scored if s["score"] >= 3]
+        likely_spam.sort(key=lambda r: r["score"], reverse=True)
+
+        # Top frequent callers (suspicious if many calls from one number).
+        frequent_callers_items: list[tuple[str, int]] = sorted(
+            [(k, v) for k, v in caller_counts.items() if v >= 3],
+            key=lambda t: t[1],
+            reverse=True,
+        )[:20]
+        frequent_callers: list[dict[str, Any]] = [
+            {"phone": phone, "calls": calls} for phone, calls in frequent_callers_items
+        ]
+
+        result: dict[str, Any] = {
+            "scanned_calls": len(all_calls),
+            "likely_spam_count": len(likely_spam),
+            "likely_spam": likely_spam,
+            "frequent_callers": frequent_callers,
+            "auto_tag": auto_tag,
+        }
+
+        if auto_tag and likely_spam:
+            ok, msg = _require_non_empty(tag_name, "tag_name")
+            if not ok:
+                return _err_msg(msg)
+            tagged = 0
+            failures: list[dict[str, Any]] = []
+            for s in likely_spam:
+                cid = s["call_id"]
+                if not cid:
+                    continue
+                try:
+                    # Use add_call_tags-equivalent flow: GET existing,
+                    # merge, PUT.
+                    existing = client.get(
+                        f"a/{aid}/calls/{cid}.json", {"fields": "tags"}
+                    ).get("tags") or []
+                    existing_names = [
+                        t.get("name") if isinstance(t, dict) else t
+                        for t in existing
+                    ]
+                    if tag_name not in existing_names:
+                        merged = list(dict.fromkeys(existing_names + [tag_name]))
+                        client.put(f"a/{aid}/calls/{cid}.json", {"tags": merged})
+                    tagged += 1
+                except CallRailError as e:
+                    failures.append({"call_id": cid, "error": str(e), "status": e.status})
+            result["tag_name_used"] = tag_name
+            result["tagged_count"] = tagged
+            result["tag_failures"] = failures
+
+        return _ok(result)
     except CallRailError as e:
         return _err(e)
 

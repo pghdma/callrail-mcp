@@ -101,7 +101,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
-**26 tools total** across read, write, tracker provisioning, and agency-level aggregation.
+**29 tools total** across read, write, tracker provisioning, and agency-level aggregation.
 
 ### Read tools
 
@@ -147,6 +147,9 @@ Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` �
 |---|---|
 | `usage_summary` | Per-company cost-attribution breakdown for the cycle. Returns minutes used, active numbers, estimated $ cost share — sorted by biggest cost driver. Useful for "which client is burning my CallRail budget" |
 | `call_eligibility_check` | Audit whether a specific call qualifies as a Google Ads conversion. Checks `gclid` presence, answered-status, duration vs. Google's threshold (default 60s), and source. Useful for "where did my conversion go" debugging |
+| `compare_periods` *(v0.5)* | Compare current N-day window vs previous N-day window. Per-company minute/call deltas + biggest mover. Catches traffic trends before they hit the invoice |
+| `bulk_update_calls` *(v0.5)* | Apply a single update (tag / note / lead_status / spam) to every call matching a filter. `dry_run=True` by default; surfaces truncation at 500-cap. Replaces dozens of sequential `update_call` invocations |
+| `spam_detector` *(v0.5)* | Heuristically flag likely-spam calls (short duration, unanswered, repeat-caller patterns). Optional `auto_tag=True` adds `auto_detected_spam` tag. Deliberately does NOT set `spam=True` (that would hide the call from default GETs) |
 
 All tools accept `account_id` optionally — if omitted, the first accessible account is auto-resolved. Most accept `company_id` to filter to a single client.
 
