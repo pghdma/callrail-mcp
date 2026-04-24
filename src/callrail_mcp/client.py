@@ -90,7 +90,13 @@ class CallRailClient:
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
-        self.api_key = api_key or _load_api_key()
+        # Strip leading/trailing whitespace and any embedded newlines that
+        # commonly come from copy-paste mistakes. Without this, requests
+        # raises a cryptic "Invalid leading whitespace ... in header value".
+        raw = api_key if api_key is not None else _load_api_key()
+        self.api_key = raw.strip().replace("\n", "").replace("\r", "")
+        if not self.api_key:
+            raise CallRailError("CallRail API key is empty after stripping whitespace.")
         self.base_url = base_url if base_url.endswith("/") else base_url + "/"
         self.timeout = timeout
         self.max_retries = max_retries
@@ -99,7 +105,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.2.1 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.2.2 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 

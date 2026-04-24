@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,32 +33,94 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _build_client() -> CallRailClient:
-    base_url = os.environ.get("CALLRAIL_BASE_URL")
-    if base_url:
-        return CallRailClient(base_url=base_url)
-    return CallRailClient()
+_client: CallRailClient | None = None
 
 
-client = _build_client()
+def get_client() -> CallRailClient:
+    """Lazy-init the singleton client so module import doesn't require an API key.
+
+    Test code can override by assigning to `callrail_mcp.server._client`.
+    """
+    global _client
+    if _client is None:
+        base_url = os.environ.get("CALLRAIL_BASE_URL")
+        _client = CallRailClient(base_url=base_url) if base_url else CallRailClient()
+    return _client
+
+
+# Backwards-compatibility shim — older code may reference `server.client`.
+class _ClientProxy:
+    """Forwards attribute access to the lazy-built client."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_client(), name)
+
+
+client = _ClientProxy()
 mcp = FastMCP("callrail-mcp")
 
 
 # ---- Shared helpers ----
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(value: str, field_name: str) -> tuple[bool, str]:
+    """Return (is_valid, error_message). Empty string is treated as not provided."""
+    if not value:
+        return True, ""
+    if not _DATE_RE.match(value):
+        return False, f"{field_name}={value!r} is not a valid YYYY-MM-DD date."
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as e:
+        return False, f"{field_name}={value!r} is not a valid date: {e}"
+    return True, ""
+
+
 def _date_window(days: int | None, start_date: str | None, end_date: str | None) -> dict[str, str]:
-    """Produce start_date/end_date query params (YYYY-MM-DD)."""
+    """Produce start_date/end_date query params (YYYY-MM-DD).
+
+    Behavior:
+    - Explicit dates always win over `days`.
+    - `days <= 0` is treated as "no window" only if the caller passes None or 0
+      explicitly; the calling tool is responsible for validating positive values.
+    """
     out: dict[str, str] = {}
     if start_date:
         out["start_date"] = start_date
     if end_date:
         out["end_date"] = end_date
-    if days and "start_date" not in out:
+    if days and days > 0 and "start_date" not in out:
         end = datetime.now(timezone.utc).date()
         start = end - timedelta(days=days)
         out["start_date"] = start.isoformat()
         out["end_date"] = end.isoformat()
     return out
+
+
+def _validate_window(
+    days: int | None, start_date: str | None, end_date: str | None
+) -> tuple[bool, str]:
+    """Cross-field validation for date windows used by listing tools."""
+    if days is not None and days < 0:
+        return False, f"days={days} is negative."
+    ok, msg = _validate_date(start_date or "", "start_date")
+    if not ok:
+        return False, msg
+    ok, msg = _validate_date(end_date or "", "end_date")
+    if not ok:
+        return False, msg
+    if start_date and end_date and start_date > end_date:
+        return False, f"end_date {end_date!r} is before start_date {start_date!r}."
+    return True, ""
+
+
+def _clamp_per_page(per_page: int) -> int:
+    """Clamp per_page to [1, MAX_PER_PAGE]. Silently corrects nonsense input."""
+    if per_page is None or per_page < 1:
+        return 1
+    return min(per_page, MAX_PER_PAGE)
 
 
 def _ok(data: Any) -> str:
@@ -69,6 +132,10 @@ def _err(e: CallRailError) -> str:
         {"error": True, "status": e.status, "message": str(e), "body": e.body},
         indent=2,
     )
+
+
+def _err_msg(message: str) -> str:
+    return json.dumps({"error": True, "status": None, "message": message}, indent=2)
 
 
 def _digits_only(s: str) -> str:
@@ -156,9 +223,12 @@ def list_calls(
             first_call,value,tags,note,gclid,fbclid,utm_source,utm_medium,
             utm_campaign,utm_content,utm_term,referrer_domain'.
     """
+    ok, msg = _validate_window(days, start_date, end_date)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -206,6 +276,9 @@ def call_summary(
     duration, and breakdowns by `source` and `source_name`. Useful for
     weekly/monthly rollups without pulling every call into context.
     """
+    ok, msg = _validate_window(days, start_date, end_date)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
@@ -266,9 +339,12 @@ def list_form_submissions(
     fields: str | None = None,
 ) -> str:
     """List form submissions captured by CallRail's Form Tracking."""
+    ok, msg = _validate_window(days, start_date, end_date)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -290,9 +366,12 @@ def list_text_messages(
     page: int = 1,
 ) -> str:
     """List SMS/text message conversations."""
+    ok, msg = _validate_window(days, start_date, end_date)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -342,16 +421,25 @@ def search_calls_by_number(
     of the stored `customer_phone_number` so any format works.
 
     Args:
-        phone_number: Any format — will be normalized.
+        phone_number: Any format — will be normalized to digits-only.
+            Must contain at least 7 digits to avoid false positives.
         account_id: Auto-resolves.
         company_id: Optional company filter.
         days: Lookback window (default 90).
     """
+    digits = _digits_only(phone_number or "")
+    if len(digits) < 7:
+        return _err_msg(
+            f"phone_number must contain at least 7 digits after stripping non-digits "
+            f"(got {len(digits)} digit{'s' if len(digits) != 1 else ''} from {phone_number!r})."
+        )
+    if len(digits) > 10:
+        digits = digits[-10:]
+    ok, msg = _validate_window(days, None, None)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        digits = _digits_only(phone_number)
-        if len(digits) > 10:
-            digits = digits[-10:]
         params: dict[str, Any] = {
             "per_page": MAX_PER_PAGE,
             "fields": "source,source_name,customer_phone_number,customer_name,answered,duration,first_call",
@@ -396,36 +484,58 @@ def update_call(
         customer_name: Override the auto-detected caller name.
         lead_status: e.g. 'good_lead', 'not_a_lead', 'unknown'.
     """
+    body: dict[str, Any] = {}
+    if note is not None:
+        body["note"] = note
+    if tags is not None:
+        body["tags"] = tags
+    if value is not None:
+        body["value"] = value
+    if spam is not None:
+        body["spam"] = spam
+    if customer_name is not None:
+        body["customer_name"] = customer_name
+    if lead_status is not None:
+        body["lead_status"] = lead_status
+    if not body:
+        return _err_msg("No fields supplied to update.")
     try:
         aid = client.resolve_account_id(account_id)
-        body: dict[str, Any] = {}
-        if note is not None:
-            body["note"] = note
-        if tags is not None:
-            body["tags"] = tags
-        if value is not None:
-            body["value"] = value
-        if spam is not None:
-            body["spam"] = spam
-        if customer_name is not None:
-            body["customer_name"] = customer_name
-        if lead_status is not None:
-            body["lead_status"] = lead_status
-        if not body:
-            return _ok({"error": True, "message": "No fields supplied to update."})
         return _ok(client.put(f"a/{aid}/calls/{call_id}.json", body))
     except CallRailError as e:
         return _err(e)
 
 
+def _clean_tag_list(tags: list[str] | None) -> list[str]:
+    """Strip whitespace, drop empties, dedupe in original order."""
+    if not tags:
+        return []
+    seen: dict[str, None] = {}
+    for t in tags:
+        if not isinstance(t, str):
+            continue
+        s = t.strip()
+        if s:
+            seen.setdefault(s, None)
+    return list(seen.keys())
+
+
 @mcp.tool()
 def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
-    """Append tags to a call without replacing existing ones."""
+    """Append tags to a call without replacing existing ones.
+
+    Empty/whitespace-only tag names are silently filtered out so that a
+    request like `add_call_tags(['', 'lead'])` won't 400 — only `'lead'`
+    is sent. Returns an error if no valid tags remain after cleaning.
+    """
+    cleaned = _clean_tag_list(tags)
+    if not cleaned:
+        return _err_msg("tags is empty (or only contained empty/whitespace strings).")
     try:
         aid = client.resolve_account_id(account_id)
         existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
         existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
-        merged = list(dict.fromkeys(existing_names + tags))
+        merged = list(dict.fromkeys(existing_names + cleaned))
         return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": merged}))
     except CallRailError as e:
         return _err(e)
@@ -433,12 +543,20 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
 
 @mcp.tool()
 def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
-    """Remove specific tags from a call (case-sensitive on tag name)."""
+    """Remove specific tags from a call (case-sensitive on tag name).
+
+    Idempotent — removing a tag that isn't attached succeeds silently.
+    Empty/whitespace-only entries in the input list are ignored.
+    """
+    cleaned = _clean_tag_list(tags)
+    if not cleaned:
+        return _err_msg("tags is empty (or only contained empty/whitespace strings).")
     try:
         aid = client.resolve_account_id(account_id)
         existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
         existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
-        kept = [t for t in existing_names if t not in tags]
+        to_remove = set(cleaned)
+        kept = [t for t in existing_names if t not in to_remove]
         return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": kept}))
     except CallRailError as e:
         return _err(e)
@@ -461,21 +579,21 @@ def update_form_submission(
         account_id: Auto-resolves if omitted.
         note, tags, value, spam, lead_status: same semantics as `update_call`.
     """
+    body: dict[str, Any] = {}
+    if note is not None:
+        body["note"] = note
+    if tags is not None:
+        body["tags"] = tags
+    if value is not None:
+        body["value"] = value
+    if spam is not None:
+        body["spam"] = spam
+    if lead_status is not None:
+        body["lead_status"] = lead_status
+    if not body:
+        return _err_msg("No fields supplied to update.")
     try:
         aid = client.resolve_account_id(account_id)
-        body: dict[str, Any] = {}
-        if note is not None:
-            body["note"] = note
-        if tags is not None:
-            body["tags"] = tags
-        if value is not None:
-            body["value"] = value
-        if spam is not None:
-            body["spam"] = spam
-        if lead_status is not None:
-            body["lead_status"] = lead_status
-        if not body:
-            return _ok({"error": True, "message": "No fields supplied to update."})
         return _ok(client.put(f"a/{aid}/form_submissions/{submission_id}.json", body))
     except CallRailError as e:
         return _err(e)
@@ -518,10 +636,9 @@ def create_tag(
             If omitted, CallRail defaults to 'gray1'.
     """
     if color is not None and color not in VALID_TAG_COLORS:
-        return _ok({
-            "error": True,
-            "message": f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}",
-        })
+        return _err_msg(
+            f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
+        )
     try:
         aid = client.resolve_account_id(account_id)
         body: dict[str, Any] = {"name": name, "company_id": company_id}
@@ -549,19 +666,18 @@ def update_tag(
             'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
     """
     if color is not None and color not in VALID_TAG_COLORS:
-        return _ok({
-            "error": True,
-            "message": f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}",
-        })
+        return _err_msg(
+            f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
+        )
+    body: dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if color is not None:
+        body["color"] = color
+    if not body:
+        return _err_msg("Supply name or color to update.")
     try:
         aid = client.resolve_account_id(account_id)
-        body: dict[str, Any] = {}
-        if name is not None:
-            body["name"] = name
-        if color is not None:
-            body["color"] = color
-        if not body:
-            return _ok({"error": True, "message": "Supply name or color to update."})
         return _ok(client.put(f"a/{aid}/tags/{tag_id}.json", body))
     except CallRailError as e:
         return _err(e)
