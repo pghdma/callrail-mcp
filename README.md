@@ -14,12 +14,23 @@ Created by **[Steve Japalucci](https://github.com/pghdma)** — Founder of [Pitt
 
 Once installed, any MCP-aware assistant can answer things like:
 
+**Reporting**
 - *"Pull last week's calls for Alan Construction, grouped by source"*
 - *"Show me every missed call from Google Ads this month"*
 - *"Find any calls from 412-555-1234 across all clients in the last 90 days"*
-- *"What's the first-time-caller rate for Malick Brothers vs. Renaissance Electric?"*
 - *"Get the transcript for call CAL019abc..."*
-- *"List form submissions from today with gclid/utm data"*
+
+**Agency cost attribution** *(new in v0.4)*
+- *"Why is my CallRail bill $174? Break it down by client"*
+- *"Which client is the biggest minute user this cycle?"*
+
+**Conversion debugging** *(new in v0.4)*
+- *"Why didn't this call convert in Google Ads? CAL019..."*
+- *"Is this 58-second call eligible to count as a Google Ads conversion?"*
+
+**Tag + tracker management**
+- *"Tag this call as 'lead' and add a note"*
+- *"Provision a new Google Ads call-extension tracker for Renaissance in area code 412"* *(requires `confirm_billing=True` — costs ~$3/mo)*
 
 ## Installation
 
@@ -90,13 +101,16 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
-**Read tools**
+**26 tools total** across read, write, tracker provisioning, and agency-level aggregation.
+
+### Read tools
 
 | Tool | Purpose |
 |---|---|
 | `list_accounts` | List accessible CallRail accounts |
-| `list_companies` | List companies (clients) under an account |
-| `list_trackers` | List tracking phone numbers + their source mapping |
+| `list_companies` | List companies (clients) under an account. Optional `status="active"` filter |
+| `list_trackers` | List tracking phone numbers + their source mapping. Optional `status="active"` filter |
+| `get_tracker` | Full detail for one tracker |
 | `list_calls` | Paginated call list — filter by company / date / source / answered |
 | `get_call` | Full detail for a specific call |
 | `call_summary` | Aggregate stats (total, answered, by source, duration) for a window |
@@ -108,14 +122,31 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 | `search_calls_by_number` | Find calls by phone number across a window |
 | `list_tags` | List tags in account or filtered to one company |
 
-**Write tools** *(new in v0.2)*
+### Write tools *(v0.2+)*
 
 | Tool | Purpose |
 |---|---|
-| `update_call` | Update note, tags, value, spam flag, customer name, lead status |
+| `update_call` | Update note, tags, spam flag, customer name, lead status |
 | `add_call_tags` / `remove_call_tags` | Additive/subtractive tag changes (preserves existing) |
 | `update_form_submission` | Same field surface as `update_call` for form entries |
 | `create_tag` / `update_tag` / `delete_tag` | Full CRUD on the per-company tag taxonomy |
+
+### Tracker provisioning *(v0.3+)*
+
+| Tool | Purpose |
+|---|---|
+| `create_tracker` | Provision a new tracking number. **Requires `confirm_billing=True`** as a safety guard against accidental AI provisioning |
+| `update_tracker` | Update mutable settings: name, destination, whisper, greeting, SMS |
+| `delete_tracker` | Soft-delete a tracker (releases the phone number, preserves history) |
+
+Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` ∈ [1, 50] (safety cap to prevent accidental 5-figure provisioning bills), name/whisper/greeting length caps, source-type enum (`all`, `direct`, `offline`, `google_my_business`, `google_ad_extension`, `facebook_all`, `bing_all`).
+
+### Agency aggregation *(v0.4+)*
+
+| Tool | Purpose |
+|---|---|
+| `usage_summary` | Per-company cost-attribution breakdown for the cycle. Returns minutes used, active numbers, estimated $ cost share — sorted by biggest cost driver. Useful for "which client is burning my CallRail budget" |
+| `call_eligibility_check` | Audit whether a specific call qualifies as a Google Ads conversion. Checks `gclid` presence, answered-status, duration vs. Google's threshold (default 60s), and source. Useful for "where did my conversion go" debugging |
 
 All tools accept `account_id` optionally — if omitted, the first accessible account is auto-resolved. Most accept `company_id` to filter to a single client.
 
@@ -136,11 +167,25 @@ See the [CallRail API docs](https://apidocs.callrail.com/) for the full field ca
 ```
 > List companies under our CallRail account.
 
-(Claude calls list_companies → returns 19 clients with IDs and primary numbers)
+(Claude calls list_companies → returns clients with IDs and primary numbers)
 
 > Pull today's calls for company COM019ab... — include source and keyword.
 
 (Claude calls list_calls with company_id, days=1, fields="source,keywords,landing_page_url")
+
+> Why is my CallRail bill $174 this month? Break it down by client.
+
+(Claude calls usage_summary → returns per-company cost share, sorted by biggest user)
+
+> Why didn't this call show up as a conversion in Google Ads? CAL019dbf79...
+
+(Claude calls call_eligibility_check → returns gclid/duration/answered checks
+ + targeted reason like "duration 58s under Google Ads minimum (60s)")
+
+> Provision a new Google-Ads-call-extension tracker for Alan Construction in 412.
+
+(Claude calls create_tracker — refuses unless you also pass confirm_billing=True
+ since it incurs a ~$3/mo charge)
 ```
 
 ### Direct Python usage
