@@ -2502,6 +2502,360 @@ def test_v050_date_window_uses_timezone() -> None:
     assert "start_date" in out  # falls back to UTC silently
 
 
+# ============================================================
+# v0.6.0 — Companies CRUD, Users CRUD, get_form_submission,
+#          get_text_message, list_webhooks, get_webhook
+# ============================================================
+
+# ---- Companies CRUD ----
+
+@responses.activate
+def test_v060_get_company_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies/COM_X.json",
+        json={"id": "COM_X", "name": "Test Co"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_company(company_id="COM_X"))
+    assert out["id"] == "COM_X"
+
+
+def test_v060_get_company_rejects_bad_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.get_company(company_id="TRK_wrong"))
+    assert out["error"] is True
+    assert "COM" in out["message"]
+
+
+@responses.activate
+def test_v060_create_company_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"id": "COM_NEW", "name": "Acme"},
+        status=201,
+    )
+    out = json.loads(server_mod.create_company(name="Acme"))
+    assert out["id"] == "COM_NEW"
+    body = json.loads(responses.calls[1].request.body)
+    assert body["name"] == "Acme"
+    assert body["time_zone"] == "America/New_York"
+    assert body["lead_scoring_enabled"] is True
+
+
+def test_v060_create_company_rejects_empty_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_company(name=""))
+    assert out["error"] is True
+
+
+def test_v060_create_company_rejects_oversize_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_company(name="A" * 256))
+    assert out["error"] is True
+
+
+@responses.activate
+def test_v060_update_company_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/companies/COM_X.json",
+        json={"id": "COM_X", "name": "Renamed"},
+        status=200,
+    )
+    out = json.loads(server_mod.update_company(company_id="COM_X", name="Renamed"))
+    assert out["name"] == "Renamed"
+
+
+def test_v060_update_company_no_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_company(company_id="COM_X"))
+    assert out["error"] is True
+    assert "No fields supplied" in out["message"]
+
+
+@responses.activate
+def test_v060_delete_company_returns_response(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        "https://api.callrail.com/v3/a/ACC1/companies/COM_X.json",
+        json={"id": "COM_X", "status": "disabled", "disabled_at": "2026-04-24T12:00:00Z"},
+        status=200,
+    )
+    out = json.loads(server_mod.delete_company(company_id="COM_X"))
+    assert out["deleted"] is True
+    assert out["company_id"] == "COM_X"
+    assert out["response"]["status"] == "disabled"
+
+
+# ---- Users CRUD ----
+
+@responses.activate
+def test_v060_get_user_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/users/USR_X.json",
+        json={"id": "USR_X", "email": "x@y.com"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_user(user_id="USR_X"))
+    assert out["email"] == "x@y.com"
+
+
+def test_v060_get_user_rejects_bad_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.get_user(user_id="COM_wrong"))
+    assert out["error"] is True
+    assert "USR" in out["message"]
+
+
+def test_v060_create_user_rejects_bad_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="not-an-email", first_name="A", last_name="B",
+    ))
+    assert out["error"] is True
+    assert "email" in out["message"]
+
+
+def test_v060_create_user_rejects_empty_first_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="", last_name="B",
+    ))
+    assert out["error"] is True
+
+
+def test_v060_create_user_validates_company_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="A", last_name="B",
+        company_ids=["COM_ok", "BAD_PREFIX"],
+    ))
+    assert out["error"] is True
+    assert "COM" in out["message"]
+
+
+@responses.activate
+def test_v060_create_user_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/users.json",
+        json={"id": "USR_NEW", "email": "ok@x.com"},
+        status=201,
+    )
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="A", last_name="B", role="reporting",
+        company_ids=["COM_X"],
+    ))
+    assert out["id"] == "USR_NEW"
+    body = json.loads(responses.calls[1].request.body)
+    assert body == {
+        "email": "ok@x.com", "first_name": "A", "last_name": "B",
+        "role": "reporting", "company_ids": ["COM_X"],
+    }
+
+
+def test_v060_create_user_warns_on_unknown_role(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unknown roles aren't rejected (CallRail may have plan-specific
+    roles), but log a warning so the user knows."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    import logging
+    with caplog.at_level(logging.WARNING):
+        # Will fail at network call (no key). We just want to verify the
+        # warning fires before the network attempt.
+        json.loads(server_mod.create_user(
+            email="ok@x.com", first_name="A", last_name="B", role="archmage",
+        ))
+    assert "archmage" in caplog.text
+
+
+@responses.activate
+def test_v060_update_user_happy(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/users/USR_X.json",
+        json={"id": "USR_X", "role": "admin"},
+        status=200,
+    )
+    out = json.loads(server_mod.update_user(user_id="USR_X", role="admin"))
+    assert out["role"] == "admin"
+
+
+@responses.activate
+def test_v060_delete_user(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        "https://api.callrail.com/v3/a/ACC1/users/USR_X.json",
+        status=204,
+    )
+    out = json.loads(server_mod.delete_user(user_id="USR_X"))
+    assert out["deleted"] is True
+
+
+# ---- Singletons + Webhooks ----
+
+@responses.activate
+def test_v060_get_form_submission(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/form_submissions/FOR_X.json",
+        json={"id": "FOR_X", "form_data": {"name": "Kevin"}},
+        status=200,
+    )
+    out = json.loads(server_mod.get_form_submission(submission_id="FOR_X"))
+    assert out["id"] == "FOR_X"
+
+
+@responses.activate
+def test_v060_get_text_message(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # Real CallRail conv IDs are short alphanumeric like "8hw3p".
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/text-messages/8hw3p.json",
+        json={"id": "8hw3p", "customer_phone_number": "+15551234567"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_text_message(conversation_id="8hw3p"))
+    assert out["id"] == "8hw3p"
+
+
+def test_v060_get_text_message_rejects_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.get_text_message(conversation_id=""))
+    assert out["error"] is True
+
+
+@responses.activate
+def test_v060_list_webhooks(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/webhooks.json",
+        json={"webhooks": []},
+        status=200,
+    )
+    out = json.loads(server_mod.list_webhooks())
+    assert "webhooks" in out
+
+
+@responses.activate
+def test_v060_get_webhook(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/webhooks/WH_1.json",
+        json={"id": "WH_1", "url": "https://example.com/hook"},
+        status=200,
+    )
+    out = json.loads(server_mod.get_webhook(webhook_id="WH_1"))
+    assert out["id"] == "WH_1"
+
+
+# ---- Validate_email helper ----
+
+@pytest.mark.parametrize("email,ok", [
+    ("ok@example.com", True),
+    ("a.b+tag@sub.domain.com", True),
+    ("plainstring", False),
+    ("@nodomain.com", False),
+    ("nodot@nodomain", False),
+    ("space in@email.com", False),
+    ("", False),
+])
+def test_v060_validate_email(email: str, ok: bool) -> None:
+    from callrail_mcp.server import _validate_email
+    got_ok, _ = _validate_email(email)
+    assert got_ok is ok
+
+
 def test_v047_validate_window_caps_huge_days() -> None:
     """v0.4.7 fix (round 16): days=10**18 was passing _validate_window
     (only floors at 0) and crashing _date_window with OverflowError from
