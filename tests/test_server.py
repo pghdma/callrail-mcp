@@ -2026,7 +2026,10 @@ def test_v050_compare_periods_happy_path(server_with_mock_client) -> None:
     assert out["previous"]["total_minutes"] == 1.0
     assert out["agency_deltas"]["minutes_delta"] == 1.0
     assert out["agency_deltas"]["minutes_pct_change"] == 100.0
-    assert out["biggest_mover"] == "A"
+    # v0.5.1: biggest_mover now includes direction.
+    assert out["biggest_mover"]["name"] == "A"
+    assert out["biggest_mover"]["direction"] == "up"
+    assert out["biggest_mover"]["minutes_delta"] == 1.0
 
 
 def test_v050_bulk_update_requires_filter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2088,6 +2091,13 @@ def test_v050_bulk_update_commit(server_with_mock_client) -> None:
         json={"calls": [
             {"id": "CAL1", "source": "bing_paid", "tags": []},
         ], "total_pages": 1},
+        status=200,
+    )
+    # v0.5.1 race-fix: bulk_update_calls now re-GETs tags per call.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"tags": []},
         status=200,
     )
     responses.add(
@@ -2241,6 +2251,151 @@ def test_v050_bulk_update_surfaces_truncation(server_with_mock_client) -> None:
     assert out["matched"] == 500
     assert out["truncated_at_cap"] is True
     assert out["hint"] is not None
+
+
+def test_v051_tag_names_from_filters_malformed() -> None:
+    """v0.5.1 B1 fix: malformed tag dicts (no 'name' key) and non-string
+    entries are filtered, not silently passed through as None."""
+    from callrail_mcp.server import _tag_names_from
+    assert _tag_names_from(None) == []
+    assert _tag_names_from([]) == []
+    # Mix of dict-with-name, dict-without-name, string, int, None.
+    assert _tag_names_from([
+        {"id": 1, "name": "lead"},
+        {"id": 2},  # no name — drop
+        "hot",
+        42,         # non-string — drop
+        None,
+        {"name": ""},  # empty name — drop
+        {"name": "vip"},
+    ]) == ["lead", "hot", "vip"]
+
+
+@responses.activate
+def test_v051_spam_detector_handles_malformed_tags(server_with_mock_client) -> None:
+    """v0.5.1 B1 fix: malformed existing tags don't break auto_tag."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [
+            {"id": "CAL_S1", "duration": 5, "answered": False,
+             "customer_phone_number": "+15551234567", "first_call": True},
+        ], "total_pages": 1},
+        status=200,
+    )
+    # Existing tags include a malformed dict with no 'name' field.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_S1.json",
+        json={"tags": [{"id": 7}, {"name": "real"}]},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_S1.json",
+        json={"id": "CAL_S1"},
+        status=200,
+    )
+    out = json.loads(server_mod.spam_detector(
+        company_id="COM1", days=30, auto_tag=True,
+    ))
+    assert out["tagged_count"] == 1
+    # The PUT body should NOT contain None — only the real string tags
+    # plus the new auto_detected_spam tag.
+    put_body = json.loads(
+        next(c for c in responses.calls if c.request.method == "PUT").request.body
+    )
+    assert None not in put_body["tags"]
+    assert put_body["tags"] == ["real", "auto_detected_spam"]
+
+
+@responses.activate
+def test_v051_compare_periods_partial_failures(server_with_mock_client) -> None:
+    """v0.5.1 B3 fix: per-company API failures now surface in
+    `partial_failures` instead of silently zeroing the company."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_OK", "name": "Working", "status": "active",
+             "time_zone": "America/New_York"},
+            {"id": "COM_FAIL", "name": "Broken", "status": "active",
+             "time_zone": "America/New_York"},
+        ], "total_pages": 1},
+        status=200,
+    )
+    # Order matters: responses serves mocks in registration order
+    # (URL match first, then FIFO). Iteration is:
+    # current[COM_OK], current[COM_FAIL], previous[COM_OK], previous[COM_FAIL].
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60}], "total_pages": 1},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"error": "service unavailable"},
+        status=503,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60}], "total_pages": 1},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"error": "service unavailable"},
+        status=503,
+    )
+    out = json.loads(server_mod.compare_periods(days=30))
+    # Two failures expected (one per window per failing company).
+    assert len(out["partial_failures"]) == 2
+    assert all(f["company_id"] == "COM_FAIL" for f in out["partial_failures"])
+    assert {f["window"] for f in out["partial_failures"]} == {"current", "previous"}
+
+
+@responses.activate
+def test_v051_spam_detector_caps_likely_spam(server_with_mock_client) -> None:
+    """v0.5.1 B8 fix: likely_spam list capped at 500 (was unbounded;
+    could blow MCP frame size on a popular spam-targeted number)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # 600 spam-scoring calls (5s, unanswered, first_call → score 4 each)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [
+            {"id": f"CAL_{i}", "duration": 5, "answered": False,
+             "customer_phone_number": f"+1555000{i:04d}", "first_call": True}
+            for i in range(600)
+        ], "total_pages": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.spam_detector(days=30, auto_tag=False))
+    assert out["likely_spam_count"] == 600
+    assert out["likely_spam_returned"] == 500
+    assert out["likely_spam_truncated"] is True
+    assert len(out["likely_spam"]) == 500
 
 
 def test_v050_compare_periods_no_overlap() -> None:

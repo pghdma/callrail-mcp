@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-04-24
+
+### Fixed (v0.5.0 round 2 audit — 11 findings)
+
+#### MEDIUM
+- **`spam_detector` was sending `[None, "tag"]`** when an existing call
+  tag dict was malformed (no `name` field). New shared helper
+  `_tag_names_from()` filters non-string entries consistently across
+  `add_call_tags`, `remove_call_tags`, `bulk_update_calls`,
+  `spam_detector`.
+- **`compare_periods` per-company API failures were silently logged**
+  (no `partial_failures[]` like `usage_summary` has). Now surfaces
+  per-company / per-window errors with `partial_calls_before_failure`
+  and `partial_minutes_before_failure` so under-counting is observable.
+- **`bulk_update_calls` had a TOCTOU tag race**. The commit phase
+  trusted the (potentially minutes-old) tags from the matched list
+  result — a concurrent caller's tag write between list-time and
+  commit-time would be silently overwritten. Now re-GETs fresh tags
+  per call before merging (mirrors `spam_detector` / `add_call_tags`
+  pattern).
+- **`spam_detector` could return MB-sized `likely_spam` arrays** on
+  popular numbers. Capped at 500 with `likely_spam_total`,
+  `likely_spam_returned`, `likely_spam_truncated` fields so callers
+  know when more exists.
+- **`bulk_update_calls` and `spam_detector` commit loops only caught
+  `CallRailError`** — an unexpected exception (e.g. from a future
+  client refactor) would abort the loop with no audit trail of what
+  was already committed. Now also catch broad `Exception` per call,
+  recording each in `failures[]`.
+
+#### LOW
+- **`bulk_update_calls` dry-run preview showed `null` in `current_tags`**
+  when CallRail returned nameless tag dicts (cosmetic, but inconsistent
+  with the now-fixed commit-path filter).
+- **`_pick_account_tz` warns on legacy TZ names** like `"EST"`/`"PST"`
+  (which `zoneinfo.ZoneInfo` accepts but treats as fixed offsets, no
+  DST — day boundaries drift 1 hour for half the year).
+- **`_pick_account_tz` warns when an agency has multiple TZs** across
+  active companies (multi-region MSPs); previously picked first
+  non-deterministically.
+- **`compare_periods` `biggest_mover`** was just a name — couldn't
+  tell from the response whether the mover went up or down. Now an
+  object with `name`, `direction` (`up`/`down`/`flat`),
+  `minutes_delta`, `minutes_pct_change`.
+
+### Added — tests
+
+- 4 new unit tests (243 → 247 total):
+  - `_tag_names_from` filters dicts-without-name + non-strings
+  - `spam_detector` handles malformed existing tags (no None in PUT body)
+  - `compare_periods` surfaces partial failures per window
+  - `spam_detector` caps likely_spam at 500
+- 2 existing tests updated for new contract:
+  - `test_v050_bulk_update_commit` adds the per-call re-GET expectation
+  - `test_v050_compare_periods_happy_path` asserts the new
+    `biggest_mover` dict shape
+
 ## [0.5.0] - 2026-04-24
 
 ### Added — 3 new agency workflow tools
