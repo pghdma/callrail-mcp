@@ -2554,7 +2554,12 @@ def test_v060_create_company_happy(server_with_mock_client) -> None:
     body = json.loads(responses.calls[1].request.body)
     assert body["name"] == "Acme"
     assert body["time_zone"] == "America/New_York"
-    assert body["lead_scoring_enabled"] is True
+    # v0.6.1 audit fix: optional bools are no longer sent unless caller
+    # explicitly specified — would otherwise disable paid features that
+    # are enabled at the account level.
+    assert "callscore_enabled" not in body
+    assert "lead_scoring_enabled" not in body
+    assert "callscribe_enabled" not in body
 
 
 def test_v060_create_company_rejects_empty_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2703,6 +2708,57 @@ def test_v060_create_user_happy(server_with_mock_client) -> None:
         "email": "ok@x.com", "first_name": "A", "last_name": "B",
         "role": "reporting", "company_ids": ["COM_X"],
     }
+
+
+def test_v061_create_user_rejects_empty_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.6.1 HIGH fix: pre-fix, create_user(role='') logged 'unknown role'
+    warning + posted empty role to CallRail."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="A", last_name="B", role="",
+    ))
+    assert out["error"] is True
+    assert "role" in out["message"]
+
+
+def test_v061_create_user_rejects_oversize_first_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="A" * 101, last_name="B",
+    ))
+    assert out["error"] is True
+    assert "first_name" in out["message"]
+
+
+def test_v061_create_user_rejects_company_ids_not_a_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.6.1 LOW fix: company_ids='COM_X' (string instead of list) used to
+    iterate chars and produce confusing per-char errors."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.create_user(
+        email="ok@x.com", first_name="A", last_name="B",
+        company_ids="COM_X",  # type: ignore[arg-type]
+    ))
+    assert out["error"] is True
+    assert "list" in out["message"]
+
+
+def test_v061_update_user_empty_email_says_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.6.1 MED fix: pre-fix, update_user(email='   ') returned
+    'doesn't look like a valid email' instead of 'required'."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_user(user_id="USR_X", email="   "))
+    assert out["error"] is True
+    assert "required" in out["message"]
 
 
 def test_v060_create_user_warns_on_unknown_role(

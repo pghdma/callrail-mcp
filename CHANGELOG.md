@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-04-24
+
+### Fixed (audit on v0.6.0 — 9 findings, 2 HIGH)
+
+#### HIGH
+- **`create_company` was force-sending all 6 optional boolean toggles
+  on every create**, with `False` defaults. On accounts where any of
+  those features (CallScore, lead scoring, Call Intelligence, keyword
+  spotting, form capture) is enabled at the account level, this would
+  have **DISABLED them on the new company**. Toggles now default to
+  `None`; only included in the request body when the caller explicitly
+  sets them.
+- **`create_user(role="")` slipped past validation**, logged a
+  misleading "unknown role" warning, and POSTed empty role to CallRail.
+  Now `_require_non_empty(role)` runs before the unknown-role check.
+
+#### MEDIUM
+- **`update_user(email="   ")` returned the wrong error message**
+  ("doesn't look like a valid email" instead of "required"). Now
+  `_require_non_empty(email)` runs before `_validate_email`.
+- **`first_name` / `last_name` had no length caps** in `create_user` /
+  `update_user`. `_MAX_USER_NAME_LEN = 100` now enforced.
+
+#### LOW
+- **`company_ids` not type-checked** in `create_user` / `update_user`.
+  Pass a string by mistake → iterates chars → confusing per-char errors.
+  Now early-rejects with `"company_ids must be a list..."`.
+- **Singleton ID lengths** (`webhook_id`, `conversation_id`,
+  `submission_id`) capped at 256 chars to prevent absurd URL paths.
+- **`get_company` docstring** now documents that disabled-record
+  responses (status="disabled") are returned NOT 404'd.
+
+### Added — tests
+
+- 4 new tests (280 → 284):
+  - `create_user(role="")` rejected
+  - `create_user(first_name="A"*101)` rejected
+  - `create_user(company_ids="COM_X")` (string not list) rejected
+  - `update_user(email="   ")` says "required" not "invalid format"
+
 ## [0.6.0] - 2026-04-24
 
 ### Added — 12 new tools (API-parity push)
