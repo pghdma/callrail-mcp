@@ -130,6 +130,17 @@ def _date_window(
     return out
 
 
+_LEGACY_TZS: frozenset[str] = frozenset({
+    "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT",
+    "AKST", "AKDT", "HST", "HDT", "AST", "ADT",
+    "GMT", "Z", "UTC-5", "UTC-8",
+})
+
+# Module-level dedup set so we don't spam the log on every aggregation call.
+_warned_tzs: set[str] = set()
+_warned_multi_tz_signature: set[frozenset[str]] = set()
+
+
 def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
     """Pick the account's IANA time_zone from a list of active company records.
 
@@ -142,6 +153,10 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
     `zoneinfo.ZoneInfo` accepts but represents as fixed offsets — these
     do NOT observe DST, so day boundaries drift by 1 hour for half the year.
 
+    Warnings are deduped per process (set tracks already-warned values)
+    to avoid log spam on repeated `usage_summary` / `compare_periods`
+    calls.
+
     Reuses the already-fetched companies list — no extra API call.
     """
     found_tzs = {
@@ -150,16 +165,20 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
         if isinstance(c.get("time_zone"), str) and c.get("time_zone")
     }
     if len(found_tzs) > 1:
-        logger.warning(
-            "Multiple time zones across active companies %s — using first; "
-            "consider passing tz explicitly to aggregation tools.",
-            sorted(tz for tz in found_tzs if isinstance(tz, str)),
-        )
+        # Dedup on the multi-TZ "signature" (sorted set of TZs).
+        signature = frozenset(tz for tz in found_tzs if isinstance(tz, str))
+        if signature not in _warned_multi_tz_signature:
+            _warned_multi_tz_signature.add(signature)
+            logger.warning(
+                "Multiple time zones across active companies %s — using first; "
+                "consider passing tz explicitly to aggregation tools.",
+                sorted(signature),
+            )
     for c in active_companies:
         tz = c.get("time_zone")
         if isinstance(tz, str) and tz:
-            # Warn on legacy non-IANA labels (no DST handling).
-            if tz.upper() in {"EST", "CST", "MST", "PST", "EDT", "CDT", "MDT", "PDT", "AKST", "HST"}:
+            if tz.upper() in _LEGACY_TZS and tz not in _warned_tzs:
+                _warned_tzs.add(tz)
                 logger.warning(
                     "CallRail returned legacy TZ %r — this is treated as a "
                     "fixed offset (no DST). Map to canonical IANA "
@@ -182,8 +201,20 @@ def _tag_names_from(tags: Any) -> list[str]:
     (tag dicts missing `name`, non-string values). Without it, we end
     up with `[None, "real_tag"]` flowing into PUT bodies, which CallRail
     400s.
+
+    Defensively rejects non-list iterables. A string `"hot"` would
+    iterate as ['h','o','t'] and corrupt real tags. A dict `{"id": 1}`
+    would iterate keys. An int crashes outright. `_tag_names_from` MUST
+    receive a list (or None) — anything else returns [] with a warning.
     """
-    if not tags:
+    if tags is None:
+        return []
+    if not isinstance(tags, list):
+        logger.warning(
+            "_tag_names_from received non-list %s — returning []. "
+            "CallRail's tags field should always be a list of dicts/strings.",
+            type(tags).__name__,
+        )
         return []
     out: list[str] = []
     for t in tags:
@@ -2103,6 +2134,7 @@ def compare_periods(
                         "window": window_label,
                         "window_start": window_start,
                         "window_end": window_end,
+                        "timezone": account_tz,
                         "error": str(e),
                         "status": e.status,
                         "partial_calls_before_failure": call_count,
@@ -2228,6 +2260,13 @@ def bulk_update_calls(
     Returns:
         - If dry_run: `{"matched": N, "would_update": [...]}`
         - Else: `{"matched": N, "updated": M, "failed": [...]}` per call
+
+    Performance note: when `set_tags_add` is used, the commit phase
+    issues 1 extra GET per call to fetch fresh tags before merging
+    (race protection against concurrent tag writes). For a max
+    bulk of 500 calls, this is ~2× the latency vs other set_*
+    fields. Other update fields (note, lead_status, spam) skip the
+    extra GET.
     """
     # Require at least one filter to avoid "update every call ever".
     if not company_id and not source and not answered and (days is None or days < 1):
@@ -2437,6 +2476,16 @@ def spam_detector(
     ok, msg = _validate_window(days, None, None, require_window=True)
     if not ok:
         return _err_msg(msg)
+    # Hard cap on `days` for spam_detector: scoring + auto-tag materializes
+    # the full call list in memory before truncating the response.
+    # days=365 on a high-volume client could be ~100MB of dicts.
+    # 90 matches the docstring's "1-90 typical" guidance.
+    if isinstance(days, int) and days > 90:
+        return _err_msg(
+            f"days={days} exceeds spam_detector cap of 90. Long windows "
+            f"can blow up memory on high-volume clients (full call list "
+            f"is materialized for scoring). Run multiple narrower scans."
+        )
     # auto_tag without company_id would tag spam across EVERY company in
     # the account in one call. Force the user to scope explicitly.
     if auto_tag and not company_id:
@@ -2498,15 +2547,15 @@ def spam_detector(
                 "source": c.get("source"),
             })
 
-        likely_spam = [s for s in scored if s["score"] >= 3]
-        likely_spam.sort(key=lambda r: r["score"], reverse=True)
-        likely_spam_total = len(likely_spam)
-        # B8 fix: cap returned list at 500 to keep MCP frame size sane.
-        # The full count is preserved in `likely_spam_total` so callers
-        # know there's more if they want to narrow the window.
+        # Keep the FULL filtered list for auto_tag operations. The
+        # returned list is a separate, truncated view to keep the MCP
+        # response frame small.
+        all_likely_spam = [s for s in scored if s["score"] >= 3]
+        all_likely_spam.sort(key=lambda r: r["score"], reverse=True)
+        likely_spam_total = len(all_likely_spam)
         SPAM_RETURN_CAP = 500
         likely_spam_truncated = likely_spam_total > SPAM_RETURN_CAP
-        likely_spam = likely_spam[:SPAM_RETURN_CAP]
+        likely_spam = all_likely_spam[:SPAM_RETURN_CAP]
 
         # Top frequent callers (suspicious if many calls from one number).
         frequent_callers_items: list[tuple[str, int]] = sorted(
@@ -2528,13 +2577,16 @@ def spam_detector(
             "auto_tag": auto_tag,
         }
 
-        if auto_tag and likely_spam:
+        if auto_tag and all_likely_spam:
             ok, msg = _require_non_empty(tag_name, "tag_name")
             if not ok:
                 return _err_msg(msg)
             tagged = 0
             failures: list[dict[str, Any]] = []
-            for s in likely_spam:
+            # Iterate the FULL filtered list (not the capped preview) so
+            # auto_tag actually covers everything matched, not just the
+            # first 500 the user can see in the response.
+            for s in all_likely_spam:
                 cid = s["call_id"]
                 if not cid:
                     continue
@@ -2561,6 +2613,7 @@ def spam_detector(
                     })
             result["tag_name_used"] = tag_name
             result["tagged_count"] = tagged
+            result["tag_attempted_count"] = likely_spam_total
             result["tag_failures"] = failures
 
         return _ok(result)

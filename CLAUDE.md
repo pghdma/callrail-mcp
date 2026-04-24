@@ -63,7 +63,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.5.1
+## Current version: 0.5.2
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -82,9 +82,10 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.4.7` — string-`days` no longer crashes `_date_window`; docstrings updated for length caps + source-slug semantics
 - `0.4.8` — `days=10**18` no longer raises OverflowError from `timedelta` (capped at 36500/100yr)
 - `0.5.0` — 3 new agency workflow tools: `compare_periods`, `bulk_update_calls`, `spam_detector` + TZ-aware `_date_window`
-- `0.5.1` — Round 2 audit on v0.5.0: 11 bugs fixed (Unicode tag filtering, partial_failures in compare_periods, paginate-truncation surfacing, TOCTOU race fix, broad exception catching, legacy-TZ + multi-TZ warnings, biggest_mover direction, likely_spam cap)
+- `0.5.1` — Round 2 audit on v0.5.0: 11 bugs (Unicode tag filtering, partial_failures, TOCTOU race fix, broad exception catching, biggest_mover direction)
+- `0.5.2` — Round 3 audit on v0.5.1: 8 bugs (HIGH: `_tag_names_from` non-list type-check; spam_detector days-cap at 90, dedup TZ warnings, auto_tag uses full filtered list)
 
-**Tests: 247 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 250 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 

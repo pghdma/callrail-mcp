@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-24
+
+### Fixed (round 3 audit on v0.5.1 — 8 findings)
+
+#### HIGH
+- **`_tag_names_from` accepted non-list iterables**, silently corrupting
+  tags. `_tag_names_from("hot,lead")` iterated chars and returned
+  `['h','o','t',',','l','e','a','d']`. `_tag_names_from({"id":1})`
+  returned dict keys. `_tag_names_from(42)` raised uncaught TypeError.
+  Combined with `bulk_update_calls` / `spam_detector` callers, malformed
+  CallRail responses could have triggered tag corruption AND auto-creation
+  of garbage tags (CallRail auto-creates unknown tag names at the company
+  level). Now type-checks the input is a list and warns + returns `[]`
+  on anything else.
+
+#### MEDIUM
+- **`spam_detector` no longer accepts `days > 90`**. Scoring + auto-tag
+  materialize the full call list in memory; `days=365` on a high-volume
+  client could be ~100MB of dicts. The docstring already advised "1-90
+  typical" but it wasn't enforced.
+- **`spam_detector(auto_tag=True)` was tagging only the cap-truncated
+  preview (500), not the full filtered set**. If 600 spam calls existed,
+  only 500 got tagged silently. Now iterates the full `all_likely_spam`
+  list and reports `tag_attempted_count` separately from `tagged_count`.
+
+#### LOW
+- **`_pick_account_tz` warnings deduped per-process**. Legacy-TZ /
+  multi-TZ warnings used to fire on every aggregation tool call,
+  spamming logs in `/loop` or repeated audits.
+- **Legacy-TZ list extended** to cover `EDT`, `CDT`, `MDT`, `PDT`,
+  `AKDT`, `HDT`, `AST`, `ADT`, `GMT`, `Z`, `UTC-5`, `UTC-8` (was
+  missing several).
+- **`compare_periods.partial_failures[]`** entries now include
+  `timezone` so a copy-pasted bug report retains TZ context.
+- **`bulk_update_calls` docstring** now documents the per-call extra
+  GET when `set_tags_add` is used (~2× latency vs other set_* fields).
+
+### Verified clean (round 3 explicit checks)
+- Exception handler ordering is correct (`CallRailError` before
+  bare `Exception` in commit loops).
+- `compare_periods` partial_failures iteration is deterministic
+  (list iteration order, not dict).
+- `bulk_update_calls` per-call GET 404 handling is loud (not silent).
+
+### Added — tests
+
+- 3 new unit tests (247 → 250 total):
+  - `_tag_names_from` rejects non-list inputs (str, dict, int) with warnings
+  - `spam_detector` days-cap at 90
+  - `_pick_account_tz` dedupes warnings per-process
+
 ## [0.5.1] - 2026-04-24
 
 ### Fixed (v0.5.0 round 2 audit — 11 findings)
