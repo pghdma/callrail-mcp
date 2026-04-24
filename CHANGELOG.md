@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-04-24
+
+### Fixed (audit pass 16)
+- **`days=10**18` (or any huge integer) raised uncaught
+  `OverflowError`** from `timedelta(days=10**18)`, crashing the MCP
+  tool reply with a trace instead of a clean error envelope. Affected
+  every windowed tool. `_validate_window` now caps `days` at 36500
+  (~100 years), comfortably above any legit lookback and far below the
+  C-int boundary.
+
+### Tests
+- 1 regression test for the days-cap (229 → 230 total).
+- Round 15's cosmetic test polish: `test_v047_list_calls_accepts_string_days`
+  now actually passes `days="7"` (was `days=7`, with a fake type-ignore).
+
 ## [0.4.7] - 2026-04-24
 
 ### Fixed (audit pass 13 + 14 — approaching the bug floor)
