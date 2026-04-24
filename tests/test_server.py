@@ -9,12 +9,14 @@ import responses
 import callrail_mcp.server as server_mod
 from callrail_mcp.client import CallRailClient
 from callrail_mcp.server import (
+    VALID_SOURCE_TYPES,
     _clamp_per_page,
     _clean_tag_list,
     _date_window,
     _require_non_empty,
     _validate_area_code,
     _validate_date,
+    _validate_id_shape,
     _validate_length,
     _validate_phone,
     _validate_pool_size,
@@ -234,6 +236,36 @@ def test_validate_tracker_status() -> None:
     assert _validate_tracker_status("disabled")[0]
     ok, msg = _validate_tracker_status("garbage")
     assert not ok and "garbage" in msg
+
+
+@pytest.mark.parametrize("value,ok", [
+    ("TRK019abc123", True),
+    ("COM019abc123", True),
+    ("TRK_xyz/admin", False),           # slash = multi-segment
+    ("TRK_xyz/../../admin", False),     # deeper slash injection
+    (".", False),                        # dots-only
+    ("..", False),                       # dots-only
+    ("...", False),                      # dots-only (the ..json slipway)
+    ("   .", False),                     # whitespace + dot
+])
+def test_validate_id_shape_no_prefix(value: str, ok: bool) -> None:
+    got_ok, _ = _validate_id_shape(value, "tracker_id")
+    assert got_ok is ok
+
+
+def test_validate_id_shape_with_prefix() -> None:
+    ok, _ = _validate_id_shape("TRK_x", "tracker_id", prefix="TRK")
+    assert ok
+    ok, msg = _validate_id_shape("COM_x", "tracker_id", prefix="TRK")
+    assert not ok and "TRK" in msg
+
+
+def test_valid_source_types_includes_live_observed() -> None:
+    """Round 2 live stress across 5 companies found Facebook + Bing ads
+    using these source types. If they get removed, legitimate tracker
+    creation breaks."""
+    assert "facebook_all" in VALID_SOURCE_TYPES
+    assert "bing_all" in VALID_SOURCE_TYPES
 
 
 # ============================================================
