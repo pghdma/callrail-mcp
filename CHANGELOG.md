@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-04-24
+
+### Changed
+
+- Added `<!-- mcp-name: io.github.pghdma/callrail-mcp -->` ownership marker
+  to README so the package can be claimed in the official MCP Registry
+  (`registry.modelcontextprotocol.io`). No code changes — README + version
+  bump only so the marker shows up on PyPI.
+
 ## [1.0.0] - 2026-04-24
 
 ### First stable release — published to PyPI
