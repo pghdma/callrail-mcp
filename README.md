@@ -23,13 +23,23 @@ Once installed, any MCP-aware assistant can answer things like:
 
 ## Installation
 
+> **Heads-up:** this package is not yet on PyPI. Install directly from GitHub
+> until the first release lands. Drop the `git+` URL for the PyPI commands once
+> it's published.
+
 ```bash
-pip install callrail-mcp
+# from GitHub (current — works today)
+pip install git+https://github.com/pghdma/callrail-mcp.git
+
+# or with pipx for isolation (recommended for the MCP CLI)
+pipx install git+https://github.com/pghdma/callrail-mcp.git
 ```
 
-Or with pipx for isolation:
+Once published to PyPI, you'll be able to use the shorter form:
 
 ```bash
+pip install callrail-mcp
+# or
 pipx install callrail-mcp
 ```
 
