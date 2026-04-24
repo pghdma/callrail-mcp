@@ -90,7 +90,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.7.0
+## Current version: 1.0.0
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -115,17 +115,20 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.5.4` — Round 5 cleanup (0 correctness bugs, 2 LOW style fixes — v0.5.x bug-hunt converged)
 - `0.6.0` — **API parity push: 12 new tools** (Companies CRUD, Users CRUD, get_form_submission, get_text_message, list_webhooks, get_webhook). API surface coverage 50% → 75%
 - `0.6.1` — Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through)
-- `0.7.0` — **Final API parity push: 8 more tools** (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API surface coverage 75% → ~85%. SMS-send + webhook-create deliberately not built (account permissions return 403).
+- `0.7.0` — Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
+- `1.0.0` — **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
 
 **Tests: 297 passing. Coverage: 84%. 49 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
-## Candidate features (ranked by agency utility)
+## Future work (deferred — see "API coverage limits" above)
 
-1. Webhook subscribe/unsubscribe
-2. Notifications config CRUD (who gets pinged on which call)
-3. Custom field CRUD
-4. Outbound call placement
-5. Do-not-call list management
+Out of scope for v1.0.0; will work on if/when:
+1. SMS send (when account gets A2P SMS API permission)
+2. Webhook integration CRUD (when account gets Integration-Admin permission)
+3. Outbound Caller IDs (if CallRail exposes via API)
+4. Custom Fields CRUD (if CallRail exposes via API)
+5. Do-not-call list management (if CallRail exposes via API)
+6. Call flows / IVR builder (if CallRail exposes via API)
 6. Toll-free minute pricing differentiation in `usage_summary`
 7. `export_calls_to_csv` for client-deliverable reporting
 

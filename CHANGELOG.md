@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-24
+
+### First stable release — published to PyPI
+
+`pip install callrail-mcp` now works.
+
+This release locks the feature surface at **49 tools, ~85% of the
+CallRail REST API v3**. The remaining 15% is documented as out-of-scope
+in the README and CLAUDE.md (either CallRail-account-permission-gated
+or UI-only on standard plans). No code changes vs v0.7.0 — version
+bump only, plus README cleanup for the PyPI launch.
+
+### Out of scope (will work on when feasible)
+
+**Blocked by CallRail account permissions** (returns 403 for standard
+accounts; verified live 2026-04-24):
+- Send SMS (`POST /text-messages.json`) — needs A2P SMS registration
+- Webhook integration CRUD (`POST /integrations.json` with `type=Webhook`)
+  — needs Integration-Admin permission
+
+**Not exposed by CallRail's REST API** (UI-only on standard plans):
+- Outbound Caller IDs verification
+- Numbers / porting / ownership
+- Call Flows (IVR builder)
+- Custom Fields CRUD
+- Do Not Call list management
+
+PRs welcome from anyone whose CallRail account has the gated
+permissions or whose CallRail plan exposes the UI-only endpoints.
+
+### Audit-and-test discipline behind v1.0
+
+Across 18 minor releases (v0.3.1 → v1.0.0) over the development
+period:
+
+- ~115 bugs caught and fixed (1 CRITICAL silent-data-loss in
+  `usage_summary` pagination, several HIGH including
+  `update_tracker(greeting_text)` that wiped destination, POST retry
+  double-write risk, `create_company` toggles disabling paid
+  features, plus dozens of MED/LOW correctness + UX fixes)
+- 60 → 297 tests, 84% coverage
+- All 5 check tools clean: `pytest -W error`, `mypy --strict`,
+  `ruff`, `bandit`, `pyright`
+- Total external API spend across development: $0
+
 ## [0.7.0] - 2026-04-24
 
 ### Added — 8 new tools (final API parity push)
