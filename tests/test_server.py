@@ -2253,6 +2253,58 @@ def test_v050_bulk_update_surfaces_truncation(server_with_mock_client) -> None:
     assert out["hint"] is not None
 
 
+def test_v052_tag_names_from_rejects_non_list(caplog: pytest.LogCaptureFixture) -> None:
+    """v0.5.2 HIGH fix (round 3 F1): pre-fix, _tag_names_from('hot,lead')
+    iterated chars → ['h','o','t',',','l','e','a','d'], corrupting tags.
+    Now rejects non-list inputs."""
+    import logging
+
+    from callrail_mcp.server import _tag_names_from
+    with caplog.at_level(logging.WARNING):
+        assert _tag_names_from("hot,lead") == []
+        assert _tag_names_from({"id": 1, "name": "x"}) == []
+        assert _tag_names_from(42) == []
+    # All three should have logged warnings.
+    assert caplog.text.count("non-list") >= 3
+
+
+def test_v052_spam_detector_caps_days_at_90(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.5.2 MED fix (round 3 F7): days=365 could materialize ~100MB
+    of call dicts for scoring. Capped at 90."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.spam_detector(days=91))
+    assert out["error"] is True
+    assert "90" in out["message"]
+    # Boundary: 90 is allowed (would proceed to API call which fails
+    # with no mock — we're only checking validation here).
+    out = json.loads(server_mod.spam_detector(days=90))
+    # Should NOT be a validation error (would be a CallRail API error
+    # because no mock; but `error` could be True with status=500 etc.).
+    # The point is the message shouldn't say "exceeds spam_detector cap".
+    assert "exceeds spam_detector cap" not in str(out)
+
+
+def test_v052_pick_account_tz_dedupes_warnings(caplog: pytest.LogCaptureFixture) -> None:
+    """v0.5.2 LOW fix (round 3 F3): legacy-TZ + multi-TZ warnings now
+    deduped per process to avoid log spam on repeated tool calls."""
+    import logging
+
+    from callrail_mcp.server import _pick_account_tz, _warned_multi_tz_signature, _warned_tzs
+    # Clear dedupe caches before this test to make assertions deterministic.
+    _warned_tzs.clear()
+    _warned_multi_tz_signature.clear()
+    with caplog.at_level(logging.WARNING):
+        # First call with legacy TZ → warns once.
+        _pick_account_tz([{"time_zone": "EST"}])
+        first_count = caplog.text.count("legacy TZ")
+        # Second call with same legacy TZ → no additional warning.
+        _pick_account_tz([{"time_zone": "EST"}])
+        second_count = caplog.text.count("legacy TZ")
+    assert first_count == 1
+    assert second_count == 1  # no additional warning
+
+
 def test_v051_tag_names_from_filters_malformed() -> None:
     """v0.5.1 B1 fix: malformed tag dicts (no 'name' key) and non-string
     entries are filtered, not silently passed through as None."""
