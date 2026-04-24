@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-24
+
+### Added
+
+- `list_companies` and `list_trackers` accept a new optional `status`
+  parameter (server-side filter via CallRail's `?status=` query). Pass
+  `status="active"` to exclude soft-deleted/disabled records — useful
+  for cleaning up dashboards after running `delete_tracker` or
+  deleting a company, since CallRail's DELETE is a soft-delete that
+  preserves history but leaves entries in the default list response.
+- Verified live: in a test account with 31 trackers (12 active),
+  `list_trackers(status="active")` correctly returns 12.
+
+### Notes
+
+CallRail's DELETE on companies and trackers is documented (now) to be
+a soft-delete: status flips to "disabled", `disabled_at` timestamp set,
+underlying phone number released back to CallRail's pool, billing for
+that number stops. The record is retained for audit. This was
+previously surfaced as confusion ("DELETE returned 200 but record still
+appears") — the new `status` filter makes the intended workflow clearer.
+
 ## [0.3.0] - 2026-04-24
 
 ### Added — tracker CRUD
