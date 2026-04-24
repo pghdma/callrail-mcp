@@ -2665,6 +2665,14 @@ def spam_detector(
 # but document the common ones.
 VALID_USER_ROLES: tuple[str, ...] = ("admin", "manager", "reporting", "analyst")
 
+# CallRail's actual user-name field limit isn't documented; 100 chars
+# is generous and prevents 10KB POST bodies on accidental input.
+_MAX_USER_NAME_LEN = 100
+
+# Cap on inline IDs (webhook_id, conversation_id, submission_id) to
+# prevent absurdly-long URL paths before CallRail rejects them.
+_MAX_ID_LEN = 256
+
 # Loose email regex — RFC 5322 is famously hard to parse correctly,
 # this is just a "looks plausible" check before burning an API call.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -2683,6 +2691,10 @@ def get_company(company_id: str, account_id: str | None = None) -> str:
     Args:
         company_id: 'COM...' id.
         account_id: Auto-resolves if omitted.
+
+    Note: Returns the disabled record (with `status: "disabled"`,
+    `disabled_at` timestamp) for soft-deleted companies — NOT 404.
+    Check the `status` field if you need to distinguish.
     """
     ok, msg = _require_non_empty(company_id, "company_id")
     if not ok:
@@ -2701,12 +2713,12 @@ def get_company(company_id: str, account_id: str | None = None) -> str:
 def create_company(
     name: str,
     time_zone: str = "America/New_York",
-    callscore_enabled: bool = False,
-    lead_scoring_enabled: bool = True,
-    swap_exclude_jquery: bool = False,
-    callscribe_enabled: bool = False,
-    keyword_spotting_enabled: bool = False,
-    form_capture: bool = False,
+    callscore_enabled: bool | None = None,
+    lead_scoring_enabled: bool | None = None,
+    swap_exclude_jquery: bool | None = None,
+    callscribe_enabled: bool | None = None,
+    keyword_spotting_enabled: bool | None = None,
+    form_capture: bool | None = None,
     account_id: str | None = None,
 ) -> str:
     """Create a new company (client) under the account.
@@ -2716,18 +2728,25 @@ def create_company(
     it is what costs money (see `create_tracker`).
 
     Args:
-        name: Display name (e.g. "Smith & Co Roofing").
+        name: Display name (e.g. "Smith & Co Roofing"). Required.
         time_zone: IANA TZ. Default 'America/New_York' (matches your
             existing companies). Common: 'America/Los_Angeles',
             'America/Chicago', 'America/Denver'.
         callscore_enabled: CallRail CallScore™ AI scoring (paid feature).
-        lead_scoring_enabled: Manual lead-status workflow (default True
-            — matches your other companies).
-        swap_exclude_jquery: Skip jQuery-driven phone swaps (rarely needed).
+            Pass None (default) to inherit account-level default.
+        lead_scoring_enabled: Manual lead-status workflow. None=inherit.
+        swap_exclude_jquery: Skip jQuery-driven phone swaps. None=inherit.
         callscribe_enabled: Conversation Intelligence transcripts (paid).
+            None=inherit.
         keyword_spotting_enabled: Real-time keyword detection in calls.
-        form_capture: Enable CallRail Form Tracking on the company.
+            None=inherit.
+        form_capture: Enable CallRail Form Tracking. None=inherit.
         account_id: Auto-resolves if omitted.
+
+    Note: Optional booleans default to None (inherit account-level
+    defaults) rather than False. Sending `False` for a paid feature on
+    an account that has it enabled would actively DISABLE it — almost
+    never the caller's intent on a fresh-create.
     """
     ok, msg = _require_non_empty(name, "name")
     if not ok:
@@ -2738,16 +2757,18 @@ def create_company(
     ok, msg = _require_non_empty(time_zone, "time_zone")
     if not ok:
         return _err_msg(msg)
-    body: dict[str, Any] = {
-        "name": name,
-        "time_zone": time_zone,
-        "callscore_enabled": callscore_enabled,
-        "lead_scoring_enabled": lead_scoring_enabled,
-        "swap_exclude_jquery": swap_exclude_jquery,
-        "callscribe_enabled": callscribe_enabled,
-        "keyword_spotting_enabled": keyword_spotting_enabled,
-        "form_capture": form_capture,
-    }
+    body: dict[str, Any] = {"name": name, "time_zone": time_zone}
+    # Only include optional toggles when the caller explicitly set them.
+    for key, val in (
+        ("callscore_enabled", callscore_enabled),
+        ("lead_scoring_enabled", lead_scoring_enabled),
+        ("swap_exclude_jquery", swap_exclude_jquery),
+        ("callscribe_enabled", callscribe_enabled),
+        ("keyword_spotting_enabled", keyword_spotting_enabled),
+        ("form_capture", form_capture),
+    ):
+        if val is not None:
+            body[key] = val
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.post(f"a/{aid}/companies.json", body))
@@ -2887,7 +2908,18 @@ def create_user(
     ok, msg = _require_non_empty(first_name, "first_name")
     if not ok:
         return _err_msg(msg)
+    ok, msg = _validate_length(first_name, "first_name", _MAX_USER_NAME_LEN)
+    if not ok:
+        return _err_msg(msg)
     ok, msg = _require_non_empty(last_name, "last_name")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(last_name, "last_name", _MAX_USER_NAME_LEN)
+    if not ok:
+        return _err_msg(msg)
+    # Audit fix: previously `role=""` slipped past as "unknown role"
+    # warning + posted empty role to CallRail.
+    ok, msg = _require_non_empty(role, "role")
     if not ok:
         return _err_msg(msg)
     if role not in VALID_USER_ROLES:
@@ -2896,7 +2928,12 @@ def create_user(
             "Adjust VALID_USER_ROLES in server.py if your plan supports it.",
             role, VALID_USER_ROLES,
         )
-    if company_ids:
+    if company_ids is not None:
+        if not isinstance(company_ids, list):
+            return _err_msg(
+                f"company_ids must be a list of 'COM...' ids "
+                f"(got {type(company_ids).__name__})."
+            )
         for cid in company_ids:
             ok, msg = _validate_id_shape(cid, "company_id (in company_ids)", prefix="COM")
             if not ok:
@@ -2940,6 +2977,11 @@ def update_user(
     if not ok:
         return _err_msg(msg)
     if email is not None:
+        # Audit fix: empty/whitespace email needs the clearer "required"
+        # error before the email-format regex error.
+        ok, msg = _require_non_empty(email, "email")
+        if not ok:
+            return _err_msg(msg)
         ok, msg = _validate_email(email)
         if not ok:
             return _err_msg(msg)
@@ -2952,12 +2994,26 @@ def update_user(
             ok, msg = _require_non_empty(value, field)
             if not ok:
                 return _err_msg(msg)
+    # Length caps on name fields (consistent with create_user).
+    if first_name is not None:
+        ok, msg = _validate_length(first_name, "first_name", _MAX_USER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if last_name is not None:
+        ok, msg = _validate_length(last_name, "last_name", _MAX_USER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
     if role is not None and role not in VALID_USER_ROLES:
         logger.warning(
             "update_user role=%r is not in known set %s; CallRail may reject.",
             role, VALID_USER_ROLES,
         )
     if company_ids is not None:
+        if not isinstance(company_ids, list):
+            return _err_msg(
+                f"company_ids must be a list of 'COM...' ids "
+                f"(got {type(company_ids).__name__})."
+            )
         for cid in company_ids:
             ok, msg = _validate_id_shape(cid, "company_id (in company_ids)", prefix="COM")
             if not ok:
@@ -3015,6 +3071,9 @@ def get_form_submission(submission_id: str, account_id: str | None = None) -> st
     ok, msg = _require_non_empty(submission_id, "submission_id")
     if not ok:
         return _err_msg(msg)
+    ok, msg = _validate_length(submission_id, "submission_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
     ok, msg = _validate_id_shape(submission_id, "submission_id")
     if not ok:
         return _err_msg(msg)
@@ -3034,6 +3093,9 @@ def get_text_message(conversation_id: str, account_id: str | None = None) -> str
             Returned by `list_text_messages` as `id` on each conversation.
     """
     ok, msg = _require_non_empty(conversation_id, "conversation_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(conversation_id, "conversation_id", _MAX_ID_LEN)
     if not ok:
         return _err_msg(msg)
     ok, msg = _validate_id_shape(conversation_id, "conversation_id")
@@ -3082,6 +3144,9 @@ def get_webhook(webhook_id: str, account_id: str | None = None) -> str:
         webhook_id: Webhook id (CallRail-assigned).
     """
     ok, msg = _require_non_empty(webhook_id, "webhook_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(webhook_id, "webhook_id", _MAX_ID_LEN)
     if not ok:
         return _err_msg(msg)
     ok, msg = _validate_id_shape(webhook_id, "webhook_id")

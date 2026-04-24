@@ -63,7 +63,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.6.0
+## Current version: 0.6.1
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -87,8 +87,9 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.5.3` — Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
 - `0.5.4` — Round 5 cleanup (0 correctness bugs, 2 LOW style fixes — v0.5.x bug-hunt converged)
 - `0.6.0` — **API parity push: 12 new tools** (Companies CRUD, Users CRUD, get_form_submission, get_text_message, list_webhooks, get_webhook). API surface coverage 50% → 75%
+- `0.6.1` — Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through; plus length caps, list type-check, docstring updates)
 
-**Tests: 280 passing. Coverage: 84%. 41 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 284 passing. Coverage: 84%. 41 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 
