@@ -158,16 +158,25 @@ def list_accounts() -> str:
 
 
 @mcp.tool()
-def list_companies(account_id: str | None = None, per_page: int = 250) -> str:
+def list_companies(
+    account_id: str | None = None,
+    per_page: int = 250,
+    status: str | None = None,
+) -> str:
     """List companies (client businesses) under a CallRail account.
 
     Args:
         account_id: CallRail account ID. Auto-resolves if omitted.
         per_page: Page size (max 250).
+        status: Filter by status. Defaults to None (returns all). Common values:
+            'active' (excludes disabled/soft-deleted), 'disabled'.
     """
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/companies.json", {"per_page": _clamp_per_page(per_page)}))
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
+        if status:
+            params["status"] = status
+        return _ok(client.get(f"a/{aid}/companies.json", params))
     except CallRailError as e:
         return _err(e)
 
@@ -190,15 +199,26 @@ def list_trackers(
     company_id: str | None = None,
     per_page: int = 250,
     page: int = 1,
+    status: str | None = None,
 ) -> str:
     """List tracking phone numbers (trackers). Each tracker maps a pool of
     phone numbers to a traffic source (Google Ads, Organic, Direct, etc.).
+
+    Args:
+        account_id: Auto-resolves if omitted.
+        company_id: Filter to one company.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+        status: Filter by status. Defaults to None (returns all, including
+            soft-deleted/disabled). Common values: 'active', 'disabled'.
     """
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         if company_id:
             params["company_id"] = company_id
+        if status:
+            params["status"] = status
         return _ok(client.get(f"a/{aid}/trackers.json", params))
     except CallRailError as e:
         return _err(e)
