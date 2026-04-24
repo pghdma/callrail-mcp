@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-24
+
+### Added — 12 new tools (API-parity push)
+
+Increases CallRail v3 API surface coverage from ~50% to ~75%. Fills
+the biggest gaps an agency owner would hit during day-to-day use.
+
+#### Companies CRUD
+- **`get_company(company_id)`** — single-record fetch.
+- **`create_company(name, time_zone, ...)`** — new client onboarding.
+  Free (CallRail bills per number, not per company). Defaults match
+  observed live shapes (TZ "America/New_York", lead_scoring_enabled
+  True).
+- **`update_company(company_id, ...)`** — change name, TZ, scoring
+  features. Empty-string fields rejected.
+- **`delete_company(company_id)`** — soft-delete (status flips to
+  "disabled", data retained). Mirrors `delete_tracker` semantics.
+
+#### Users CRUD
+- **`get_user(user_id)`** — single-record fetch.
+- **`create_user(email, first_name, last_name, role, company_ids)`** —
+  invites a new user (CallRail emails them). Validates email format,
+  warns on unknown roles. Common roles: admin / manager / reporting /
+  analyst.
+- **`update_user(user_id, ...)`** — mutate email/name/role/companies.
+- **`delete_user(user_id)`** — hard-removes user from account
+  (different from companies/trackers which soft-delete).
+
+#### Singletons (filling missing get-one endpoints)
+- **`get_form_submission(submission_id)`** — was list+update only.
+- **`get_text_message(conversation_id)`** — was list-only. Conv IDs
+  are short alphanumeric strings (e.g. `"8hw3p"`), no prefix.
+
+#### Webhooks (read-only for v0.6.0)
+- **`list_webhooks(company_id?)`** — discover existing webhooks.
+- **`get_webhook(webhook_id)`** — single-record detail.
+- (CRUD deferred to v0.6.1 — request body shapes need live API
+  verification before shipping create/update/delete.)
+
+### Added — tests
+- 29 new tests (251 → 280). Coverage maintained at 84%.
+
+### Deferred to v0.6.1
+Need live API verification of request body shapes:
+- SMS send / reply (requires compliance-keyword handling per docs)
+- Webhook create / update / delete
+- Form submission manual create
+- Outbound call placement
+
+## [0.5.4] - 2026-04-24
+
+### Changed (round 5 cleanup, 0 correctness bugs)
+- Hoisted `_SPAM_AUTO_TAG_CAP` to module level (consistency with
+  `_BULK_UPDATE_CAP`).
+- Extracted `_coerce_days_int()` helper to dedupe coercion logic
+  between `_validate_window` and `spam_detector`.
+
+Round 5 audit on v0.5.3 found ZERO correctness bugs. We're at the
+v0.5.x bug floor.
+
 ## [0.5.3] - 2026-04-24
 
 ### Fixed (round 4 audit on v0.5.2 — 4 findings, converging)

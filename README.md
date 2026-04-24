@@ -101,7 +101,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
-**29 tools total** across read, write, tracker provisioning, and agency-level aggregation.
+**41 tools total** across read, write, tracker provisioning, agency aggregation, and account management (Companies/Users CRUD).
 
 ### Read tools
 
@@ -138,6 +138,16 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 | `create_tracker` | Provision a new tracking number. **Requires `confirm_billing=True`** as a safety guard against accidental AI provisioning |
 | `update_tracker` | Update mutable settings: name, destination, whisper, greeting, SMS |
 | `delete_tracker` | Soft-delete a tracker (releases the phone number, preserves history) |
+
+### Account management *(v0.6+)*
+
+| Tool | Purpose |
+|---|---|
+| `get_company` / `create_company` / `update_company` / `delete_company` | Full company (client) CRUD. Free — CallRail bills per number, not per company. Soft-delete semantics |
+| `get_user` / `create_user` / `update_user` / `delete_user` | Full user CRUD. `create_user` invites by email; common roles: admin / manager / reporting / analyst |
+| `get_form_submission` | Single form-submission detail (was list+update only) |
+| `get_text_message` | Single SMS conversation detail with all messages |
+| `list_webhooks` / `get_webhook` | Discover existing webhook subscriptions (CRUD coming in v0.6.1) |
 
 Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` ∈ [1, 50] (safety cap to prevent accidental 5-figure provisioning bills), name/whisper/greeting length caps, source-type enum (`all`, `direct`, `offline`, `google_my_business`, `google_ad_extension`, `facebook_all`, `bing_all`).
 

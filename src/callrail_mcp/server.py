@@ -2654,6 +2654,446 @@ def spam_detector(
         return _err(e)
 
 
+# ============================================================
+# v0.6.0 — API parity tools (Companies CRUD, Users CRUD, single-record
+# GETs for forms / text-messages, read-only webhooks)
+# ============================================================
+
+# CallRail v3 docs (where accessible) and live response shapes confirm
+# these role values. CallRail also has 'manager' / 'analyst' on some
+# plans; rejecting unknown values would be too strict — pass through
+# but document the common ones.
+VALID_USER_ROLES: tuple[str, ...] = ("admin", "manager", "reporting", "analyst")
+
+# Loose email regex — RFC 5322 is famously hard to parse correctly,
+# this is just a "looks plausible" check before burning an API call.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email(value: str, field_name: str = "email") -> tuple[bool, str]:
+    if not _EMAIL_RE.match(value):
+        return False, f"{field_name}={value!r} doesn't look like a valid email."
+    return True, ""
+
+
+@mcp.tool()
+def get_company(company_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one company.
+
+    Args:
+        company_id: 'COM...' id.
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/companies/{company_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_company(
+    name: str,
+    time_zone: str = "America/New_York",
+    callscore_enabled: bool = False,
+    lead_scoring_enabled: bool = True,
+    swap_exclude_jquery: bool = False,
+    callscribe_enabled: bool = False,
+    keyword_spotting_enabled: bool = False,
+    form_capture: bool = False,
+    account_id: str | None = None,
+) -> str:
+    """Create a new company (client) under the account.
+
+    Useful for new-client onboarding. CallRail bills per number, not per
+    company — creating a company is free; provisioning trackers under
+    it is what costs money (see `create_tracker`).
+
+    Args:
+        name: Display name (e.g. "Smith & Co Roofing").
+        time_zone: IANA TZ. Default 'America/New_York' (matches your
+            existing companies). Common: 'America/Los_Angeles',
+            'America/Chicago', 'America/Denver'.
+        callscore_enabled: CallRail CallScore™ AI scoring (paid feature).
+        lead_scoring_enabled: Manual lead-status workflow (default True
+            — matches your other companies).
+        swap_exclude_jquery: Skip jQuery-driven phone swaps (rarely needed).
+        callscribe_enabled: Conversation Intelligence transcripts (paid).
+        keyword_spotting_enabled: Real-time keyword detection in calls.
+        form_capture: Enable CallRail Form Tracking on the company.
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(name, "name")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _require_non_empty(time_zone, "time_zone")
+    if not ok:
+        return _err_msg(msg)
+    body: dict[str, Any] = {
+        "name": name,
+        "time_zone": time_zone,
+        "callscore_enabled": callscore_enabled,
+        "lead_scoring_enabled": lead_scoring_enabled,
+        "swap_exclude_jquery": swap_exclude_jquery,
+        "callscribe_enabled": callscribe_enabled,
+        "keyword_spotting_enabled": keyword_spotting_enabled,
+        "form_capture": form_capture,
+    }
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/companies.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_company(
+    company_id: str,
+    name: str | None = None,
+    time_zone: str | None = None,
+    callscore_enabled: bool | None = None,
+    lead_scoring_enabled: bool | None = None,
+    swap_exclude_jquery: bool | None = None,
+    callscribe_enabled: bool | None = None,
+    keyword_spotting_enabled: bool | None = None,
+    form_capture: bool | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Update mutable settings on a company. Pass None to leave unchanged.
+
+    Empty-string `name` / `time_zone` are rejected (almost always a mistake).
+    """
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
+    if name is not None:
+        ok, msg = _require_non_empty(name, "name")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _require_non_empty(time_zone, "time_zone")
+        if not ok:
+            return _err_msg(msg)
+    body: dict[str, Any] = {}
+    for key, val in (
+        ("name", name),
+        ("time_zone", time_zone),
+        ("callscore_enabled", callscore_enabled),
+        ("lead_scoring_enabled", lead_scoring_enabled),
+        ("swap_exclude_jquery", swap_exclude_jquery),
+        ("callscribe_enabled", callscribe_enabled),
+        ("keyword_spotting_enabled", keyword_spotting_enabled),
+        ("form_capture", form_capture),
+    ):
+        if val is not None:
+            body[key] = val
+    if not body:
+        return _err_msg("No fields supplied to update.")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.put(f"a/{aid}/companies/{company_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def delete_company(company_id: str, account_id: str | None = None) -> str:
+    """Soft-delete a company. Status flips to 'disabled', records retained.
+
+    Mirrors `delete_tracker` semantics: CallRail's DELETE on companies is
+    a soft-delete. Use `list_companies(status="active")` to filter out
+    disabled companies after deletion.
+
+    Returns: `{"deleted": True, "company_id": ..., "response": ...}`.
+    """
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        result = client.delete(f"a/{aid}/companies/{company_id}.json")
+        return _ok({"deleted": True, "company_id": company_id, "response": result})
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_user(user_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one user.
+
+    Args:
+        user_id: 'USR...' id.
+    """
+    ok, msg = _require_non_empty(user_id, "user_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/users/{user_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_user(
+    email: str,
+    first_name: str,
+    last_name: str,
+    role: str = "reporting",
+    company_ids: list[str] | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Invite a new user. CallRail emails them an account-creation link.
+
+    Args:
+        email: Recipient email. CallRail sends an invite.
+        first_name, last_name: Display name.
+        role: Default 'reporting' (read-only). Common values:
+            'admin', 'manager', 'reporting', 'analyst'. Other plan-specific
+            roles may exist; we don't reject unknown values, just warn.
+        company_ids: List of 'COM...' company IDs the user can access.
+            Empty/None = account-wide (admins typically).
+        account_id: Auto-resolves if omitted.
+
+    Note: This sends an invitation email. Don't run experimentally.
+    """
+    ok, msg = _require_non_empty(email, "email")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_email(email)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _require_non_empty(first_name, "first_name")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _require_non_empty(last_name, "last_name")
+    if not ok:
+        return _err_msg(msg)
+    if role not in VALID_USER_ROLES:
+        logger.warning(
+            "create_user role=%r is not in known set %s; CallRail may reject. "
+            "Adjust VALID_USER_ROLES in server.py if your plan supports it.",
+            role, VALID_USER_ROLES,
+        )
+    if company_ids:
+        for cid in company_ids:
+            ok, msg = _validate_id_shape(cid, "company_id (in company_ids)", prefix="COM")
+            if not ok:
+                return _err_msg(msg)
+    body: dict[str, Any] = {
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "role": role,
+    }
+    if company_ids:
+        body["company_ids"] = company_ids
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/users.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_user(
+    user_id: str,
+    email: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    role: str | None = None,
+    company_ids: list[str] | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Update mutable user fields. Pass None to leave unchanged.
+
+    Args:
+        user_id: 'USR...' id.
+        company_ids: REPLACES the user's company access list (additive
+            modification not exposed; for additive use the CallRail UI).
+    """
+    ok, msg = _require_non_empty(user_id, "user_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+    if not ok:
+        return _err_msg(msg)
+    if email is not None:
+        ok, msg = _validate_email(email)
+        if not ok:
+            return _err_msg(msg)
+    for value, field in (
+        (first_name, "first_name"),
+        (last_name, "last_name"),
+        (role, "role"),
+    ):
+        if value is not None:
+            ok, msg = _require_non_empty(value, field)
+            if not ok:
+                return _err_msg(msg)
+    if role is not None and role not in VALID_USER_ROLES:
+        logger.warning(
+            "update_user role=%r is not in known set %s; CallRail may reject.",
+            role, VALID_USER_ROLES,
+        )
+    if company_ids is not None:
+        for cid in company_ids:
+            ok, msg = _validate_id_shape(cid, "company_id (in company_ids)", prefix="COM")
+            if not ok:
+                return _err_msg(msg)
+    body: dict[str, Any] = {}
+    for key, val in (
+        ("email", email),
+        ("first_name", first_name),
+        ("last_name", last_name),
+        ("role", role),
+        ("company_ids", company_ids),
+    ):
+        if val is not None:
+            body[key] = val
+    if not body:
+        return _err_msg("No fields supplied to update.")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.put(f"a/{aid}/users/{user_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def delete_user(user_id: str, account_id: str | None = None) -> str:
+    """Remove a user from the account.
+
+    CallRail's DELETE on users is typically a hard-remove (unlike
+    companies/trackers which soft-delete). The user loses access
+    immediately.
+
+    Returns: `{"deleted": True, "user_id": ..., "response": ...}`.
+    """
+    ok, msg = _require_non_empty(user_id, "user_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        result = client.delete(f"a/{aid}/users/{user_id}.json")
+        return _ok({"deleted": True, "user_id": user_id, "response": result})
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_form_submission(submission_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one form submission.
+
+    Args:
+        submission_id: 'FOR...' id.
+    """
+    ok, msg = _require_non_empty(submission_id, "submission_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(submission_id, "submission_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/form_submissions/{submission_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_text_message(conversation_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one SMS conversation, including all messages.
+
+    Args:
+        conversation_id: Short alphanumeric conversation id (e.g. '8hw3p').
+            Returned by `list_text_messages` as `id` on each conversation.
+    """
+    ok, msg = _require_non_empty(conversation_id, "conversation_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(conversation_id, "conversation_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/text-messages/{conversation_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_webhooks(
+    company_id: str | None = None,
+    per_page: int = 250,
+    page: int = 1,
+    account_id: str | None = None,
+) -> str:
+    """List webhook subscriptions on the account or one company.
+
+    Args:
+        company_id: Filter to webhooks attached to one company.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+        account_id: Auto-resolves if omitted.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {
+            "per_page": _clamp_per_page(per_page),
+            "page": max(1, page),
+        }
+        if company_id:
+            params["company_id"] = company_id
+        return _ok(client.get(f"a/{aid}/webhooks.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_webhook(webhook_id: str, account_id: str | None = None) -> str:
+    """Get full detail for one webhook subscription.
+
+    Args:
+        webhook_id: Webhook id (CallRail-assigned).
+    """
+    ok, msg = _require_non_empty(webhook_id, "webhook_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(webhook_id, "webhook_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/webhooks/{webhook_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
 def main() -> None:
     """CLI entry point for stdio transport.
 
