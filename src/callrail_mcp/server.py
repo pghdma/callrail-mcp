@@ -15,7 +15,6 @@ Run standalone for stdio transport:
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -118,6 +117,15 @@ def _validate_window(
             list_calls semantics where a single page of all-time data is
             an acceptable fallback.
     """
+    # Reject `bool` early: in Python `isinstance(True, int)` is True,
+    # which means `days=True` would silently be treated as `days=1`.
+    # Almost certainly a caller mistake (probably wanted `False` to skip
+    # the window or wrote `days=True` meaning "use default").
+    if isinstance(days, bool):
+        return False, (
+            f"days={days!r} is a bool, not an integer. "
+            f"Pass an integer number of days (or omit for default)."
+        )
     # Coerce string-typed days from MCP clients that send loose JSON.
     # Reject non-integer floats explicitly — `int(1.5)` silently truncates,
     # which would surprise a user who wrote `days=1.5` expecting ~36h.
@@ -834,8 +842,14 @@ def call_summary(
                 repeat += 1
             # Robust int coercion — match usage_summary's defense (CallRail
             # currently returns int but shape changes shouldn't crash mid-loop).
-            with contextlib.suppress(TypeError, ValueError):
-                duration_total += int(float(c.get("duration") or 0))
+            raw_duration = c.get("duration") or 0
+            try:
+                duration_total += int(float(raw_duration))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "call_summary: skipping call with malformed "
+                    "duration=%r in call %s", raw_duration, c.get("id", "?"),
+                )
             src = c.get("source") or "(none)"
             by_source[src] = by_source.get(src, 0) + 1
             sname = c.get("source_name") or "(none)"
@@ -1101,16 +1115,28 @@ def update_call(
 
 
 def _clean_tag_list(tags: list[str] | None) -> list[str]:
-    """Strip whitespace, drop empties, dedupe in original order."""
+    """Strip whitespace, drop empties, dedupe in original order.
+
+    Logs a warning when non-string entries are dropped (helps debug
+    callers that pass mixed types like `[42, 'hot']` and wonder why
+    only one tag was added).
+    """
     if not tags:
         return []
     seen: dict[str, None] = {}
+    dropped_non_strings = 0
     for t in tags:
         if not isinstance(t, str):
+            dropped_non_strings += 1
             continue
         s = t.strip()
         if s:
             seen.setdefault(s, None)
+    if dropped_non_strings:
+        logger.warning(
+            "_clean_tag_list dropped %d non-string entries; "
+            "tags must be strings.", dropped_non_strings,
+        )
     return list(seen.keys())
 
 
@@ -1377,18 +1403,21 @@ def _is_toll_free(number: str | None) -> bool:
     rather than mis-classifying them as local — the cost model in
     `usage_summary` doesn't price non-NANP numbers correctly anyway.
 
-    Strips trailing extensions (`+18005551234x77`) before classification
-    so a toll-free with extension still bills correctly. Uses ASCII-only
-    digit detection (Devanagari etc. are NOT extracted).
+    Extracts ASCII digits and looks at the first 11 starting with '1'.
+    Handles common variations:
+      - Bare E.164: '+18005551234' → toll-free
+      - With extension: '+18005551234x77' → toll-free (trailing digits
+        treated as extension, not number)
+      - Human-formatted: '+1,800,555,1234' / '1-800-555-1234' →
+        toll-free (separators stripped, first 11 digits used)
     """
     if not number:
         return False
-    # Strip extension dialing (RFC 3966): everything after 'x', ';ext=', or ','.
-    cleaned = re.split(r"[xX,;]", number, maxsplit=1)[0]
-    digits = "".join(c for c in cleaned if c in "0123456789")
-    # NANP is exactly 11 digits with a leading "1". Anything longer is
-    # likely international + extension noise; truncate to first 11 if it
-    # starts with "1" so toll-free with stripped junk still classifies.
+    # Extract ASCII digits only (rejects Devanagari etc. by design).
+    digits = "".join(c for c in number if c in "0123456789")
+    # NANP toll-free: 11 digits, leading '1', specific area-code prefix.
+    # If we have MORE than 11 digits, treat the trailing digits as an
+    # extension and look at the first 11.
     if len(digits) >= 11 and digits[0] == "1":
         return digits[1:4] in {"800", "888", "877", "866", "855", "844", "833"}
     return False
@@ -1459,6 +1488,15 @@ def usage_summary(
             cid = c.get("id")
             if not cid:
                 continue
+            # Initialize accumulators OUTSIDE the try so that a mid-loop
+            # paginate failure can still surface the partial counts in
+            # partial_failures (otherwise the user has no idea this
+            # company contributed 800 minutes that vanished from the
+            # agency_total).
+            local_numbers = 0
+            toll_free_numbers = 0
+            total_seconds = 0
+            call_count = 0
             try:
                 # Active trackers + their tracking numbers (paginated).
                 trackers = list(
@@ -1468,8 +1506,6 @@ def usage_summary(
                         items_key="trackers",
                     )
                 )
-                local_numbers = 0
-                toll_free_numbers = 0
                 for t in trackers:
                     for num in t.get("tracking_numbers") or []:
                         if _is_toll_free(num):
@@ -1479,8 +1515,6 @@ def usage_summary(
                 # Calls + minutes in window (paginated). Critical: without
                 # this, big clients silently truncate at 250 calls.
                 call_params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
-                total_seconds = 0
-                call_count = 0
                 for call in client.paginate(
                     f"a/{aid}/calls.json", call_params, items_key="calls"
                 ):
@@ -1488,9 +1522,15 @@ def usage_summary(
                     # Robust int coercion — CallRail returns int but defend
                     # against future changes that ship strings/floats.
                     raw_duration = call.get("duration") or 0
-                    # Skip malformed durations rather than crash the report.
-                    with contextlib.suppress(TypeError, ValueError):
+                    try:
                         total_seconds += int(float(raw_duration))
+                    except (TypeError, ValueError):
+                        # Log + skip — surfaces malformed data without
+                        # crashing the report.
+                        logger.warning(
+                            "usage_summary: skipping call with malformed "
+                            "duration=%r in company %s", raw_duration, cid,
+                        )
                 minutes = round(total_seconds / 60.0, 1)
                 per_company.append({
                     "company_id": cid,
@@ -1503,12 +1543,18 @@ def usage_summary(
                 })
             except CallRailError as e:
                 # Per-company partial-success: don't let one company's
-                # transient failure poison the whole agency report.
+                # transient failure poison the whole agency report. Surface
+                # whatever we accumulated before the failure so the user
+                # can see the under-count was real and how big it was.
                 partial_failures.append({
                     "company_id": cid,
                     "company_name": c.get("name", "(unnamed)"),
                     "error": str(e),
                     "status": e.status,
+                    "partial_calls_before_failure": call_count,
+                    "partial_minutes_before_failure": round(total_seconds / 60.0, 1),
+                    "partial_local_numbers": local_numbers,
+                    "partial_tollfree_numbers": toll_free_numbers,
                 })
                 continue
 

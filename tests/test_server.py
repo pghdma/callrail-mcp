@@ -24,6 +24,9 @@ from callrail_mcp.server import (
     _validate_window,
 )
 
+# Re-export for use in v0.4.6 tests
+__all__ = ["_clean_tag_list"]
+
 
 @pytest.fixture
 def server_with_mock_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1895,6 +1898,95 @@ def test_v045_call_eligibility_bare_google_source(server_with_mock_client) -> No
     )
     out = json.loads(server_mod.call_eligibility_check(call_id="CAL_G"))
     assert out["checks"]["is_google_source"] is True
+
+
+# ============================================================
+# v0.4.6 — Audit pass 12 fixes
+# ============================================================
+
+@responses.activate
+def test_v046_partial_failure_surfaces_accumulated_data(
+    server_with_mock_client,
+) -> None:
+    """v0.4.6 fix (F1, HIGH): when a company's call pagination fails
+    mid-flight, the partial accumulator was silently dropped — agency
+    total under-reported with no way for the user to know how much was
+    lost. Now reported in partial_failures."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [{"id": "COM_X", "name": "Company X", "status": "active"}], "total_pages": 1},
+        status=200,
+    )
+    # Trackers succeed.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [{"tracking_numbers": ["+14125551001"]}], "total_pages": 1},
+        status=200,
+    )
+    # Calls page 1 succeeds with 5 calls × 60s = 5 minutes.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60} for _ in range(5)], "page": 1, "total_pages": 3},
+        status=200,
+    )
+    # Calls page 2 fails with 503.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"error": "service unavailable"},
+        status=503,
+    )
+    out = json.loads(server_mod.usage_summary(days=30))
+    assert len(out["partial_failures"]) == 1
+    pf = out["partial_failures"][0]
+    # Accumulated data is now visible — pre-fix this was 0.
+    assert pf["partial_calls_before_failure"] == 5
+    assert pf["partial_minutes_before_failure"] == 5.0
+    assert pf["partial_local_numbers"] == 1
+
+
+def test_v046_is_toll_free_handles_comma_format() -> None:
+    """v0.4.6 fix (F2): '+1,800,555,1234' (comma-separated) was being
+    split at first comma, leaving '+1', losing the 800-prefix detection.
+    Now we extract digits ignoring all separators."""
+    from callrail_mcp.server import _is_toll_free
+    assert _is_toll_free("+1,800,555,1234") is True
+    assert _is_toll_free("1-800-555-1234") is True
+    assert _is_toll_free("1.800.555.1234") is True
+    # (800)... without country code (10 digits) is NANP-format-incomplete;
+    # we require the leading 1 to match. CallRail normalizes to E.164
+    # internally so this matters mostly for human-formatted inputs.
+    assert _is_toll_free("(800) 555-1234") is False
+
+
+def test_v046_validate_window_rejects_bool() -> None:
+    """v0.4.6 fix (F4): isinstance(True, int) is True in Python, so
+    days=True silently became days=1. Now explicitly rejected."""
+    ok, msg = _validate_window(True, None, None)
+    assert not ok
+    assert "bool" in msg
+    ok, msg = _validate_window(False, None, None)
+    assert not ok
+
+
+def test_v046_clean_tag_list_logs_dropped_non_strings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """v0.4.6 fix (F5): non-string entries silently dropped. Now logged."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        result = _clean_tag_list(["hot", 42, "lead", None, "vip"])
+    assert result == ["hot", "lead", "vip"]
+    assert "dropped 2 non-string" in caplog.text
 
 
 @responses.activate
