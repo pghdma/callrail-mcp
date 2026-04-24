@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-04-24
+
+### Removed (BREAKING for `update_call`)
+
+- **`value` parameter removed from `update_call`.** Discovered through
+  round-trip determinism testing: CallRail's API returns **HTTP 500 server
+  error** when `value` is included in a PUT to `/calls/{id}` (verified live
+  multiple times). Each rejected request also burned 3 retry attempts due
+  to our 5xx-retry policy. The field is undocumented for calls in CallRail's
+  REST docs and may be a future feature, but it's broken today.
+
+  `value` remains supported on `update_form_submission` (different endpoint,
+  different behavior) where it is documented and works.
+
+### Added
+
+- `update_call` docstring now warns about CallRail's "spam-flagged calls
+  vanish from default GET endpoints" behavior — tag the call BEFORE marking
+  it spam if you need to do both.
+
+### Notes
+
+This release contains no fixes from a fresh bug hunt; rather, it removes a
+field that direct testing proved CallRail itself does not support.
+
 ## [0.2.3] - 2026-04-24
 
 ### Security

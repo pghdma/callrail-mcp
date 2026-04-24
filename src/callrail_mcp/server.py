@@ -466,12 +466,11 @@ def update_call(
     account_id: str | None = None,
     note: str | None = None,
     tags: list[str] | None = None,
-    value: float | None = None,
     spam: bool | None = None,
     customer_name: str | None = None,
     lead_status: str | None = None,
 ) -> str:
-    """Update an existing call: notes, tags, value, spam flag, customer name, lead status.
+    """Update an existing call: notes, tags, spam flag, customer name, lead status.
 
     Args:
         call_id: 'CAL...' id of the call to update.
@@ -479,18 +478,22 @@ def update_call(
         note: Replace the call's note text.
         tags: REPLACE the call's tag list with this set of tag names.
               (Use `add_call_tags`/`remove_call_tags` for additive changes.)
-        value: Set the call's monetary value.
-        spam: True to mark as spam, False to unmark.
+        spam: True to mark as spam, False to unmark. Note: spam-flagged calls
+              are HIDDEN from default GET endpoints — re-reads will 404. Tag
+              the call BEFORE flagging spam if you need both.
         customer_name: Override the auto-detected caller name.
         lead_status: e.g. 'good_lead', 'not_a_lead', 'unknown'.
+
+    Note: `value` is intentionally NOT exposed here. CallRail's API returns
+    a 500 server error when `value` is included in the PUT body to /calls
+    (verified via live testing 2026-04-24). It IS supported on form
+    submissions — see `update_form_submission`.
     """
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
     if tags is not None:
         body["tags"] = tags
-    if value is not None:
-        body["value"] = value
     if spam is not None:
         body["spam"] = spam
     if customer_name is not None:
