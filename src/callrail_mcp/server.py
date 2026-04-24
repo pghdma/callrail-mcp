@@ -172,6 +172,18 @@ def list_companies(account_id: str | None = None, per_page: int = 250) -> str:
         return _err(e)
 
 
+VALID_TRACKER_TYPES: tuple[str, ...] = ("source", "session")
+# Discovered empirically by exhaustive testing — CallRail's docs do not enumerate.
+# Any other source.type value returns 400 "Source Unknown tracking source type".
+VALID_SOURCE_TYPES: tuple[str, ...] = (
+    "all",
+    "direct",
+    "offline",
+    "google_my_business",
+    "google_ad_extension",  # Google Ads call extensions
+)
+
+
 @mcp.tool()
 def list_trackers(
     account_id: str | None = None,
@@ -188,6 +200,201 @@ def list_trackers(
         if company_id:
             params["company_id"] = company_id
         return _ok(client.get(f"a/{aid}/trackers.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_tracker(tracker_id: str, account_id: str | None = None) -> str:
+    """Get full detail for a specific tracker.
+
+    Args:
+        tracker_id: 'TRK...' id.
+        account_id: Auto-resolves if omitted.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/trackers/{tracker_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_tracker(
+    name: str,
+    company_id: str,
+    destination_number: str,
+    confirm_billing: bool = False,
+    type: str = "source",
+    source_type: str = "all",
+    area_code: str | None = None,
+    toll_free: bool = False,
+    pool_size: int | None = None,
+    whisper_message: str | None = None,
+    recording_enabled: bool = True,
+    greeting_text: str | None = None,
+    sms_enabled: bool = True,
+    account_id: str | None = None,
+) -> str:
+    """⚠️  Create a new tracking phone number (tracker). **THIS COSTS MONEY.**
+
+    CallRail charges per provisioned number — typical pricing as of 2026:
+      - Local numbers: ~$3/month each
+      - Toll-free (8XX): ~$3-5/month each
+      - Session pools: charged per number × pool_size (so pool_size=8 = 8x)
+      - Plus per-minute usage (~$0.05/min on answered calls)
+
+    Most plans bundle 5–10 numbers; provisioning beyond your bundle adds
+    overage charges. Some plans prorate partial-month usage, so creating
+    and immediately deleting can still produce a small charge depending
+    on your contract.
+
+    **You must pass `confirm_billing=True` to actually create.** This guards
+    against accidental provisioning when an AI is exploring tools.
+
+    Args:
+        name: Display name for the tracker (e.g. "Google Ads Call Extension").
+        company_id: 'COM...' id of the company this tracker belongs to.
+        destination_number: Where calls forward to, e.g. "+14129548337".
+        confirm_billing: REQUIRED — set True to acknowledge the per-number
+            cost. Returns an error envelope if False (default).
+        type: 'source' (single number tied to one traffic source) or 'session'
+            (DNI pool that swaps numbers per visitor). Default 'source'.
+        source_type: For type='source', which traffic source. Must be one of:
+            'all', 'direct', 'offline', 'google_my_business',
+            'google_ad_extension' (this is what Google Ads call-extension uses).
+            Ignored for type='session' (use 'all').
+        area_code: 3-digit area code to provision the local number from
+            (e.g. '412'). Ignored if `toll_free=True`.
+        toll_free: If True, provision an 8XX toll-free number instead.
+        pool_size: For type='session' only — how many numbers in the DNI pool
+            (CallRail's "pool_size" required field). Typical 4-10. Each pool
+            number is billed separately.
+        whisper_message: Spoken to the agent answering the call so they know
+            which marketing source it came from.
+        recording_enabled: Record the call audio. Default True.
+        greeting_text: Optional automated greeting text-to-speech.
+        sms_enabled: Allow this number to receive/send SMS. Default True.
+        account_id: Auto-resolves if omitted.
+
+    Returns the created tracker including its newly-provisioned tracking_numbers.
+    """
+    if not confirm_billing:
+        return _err_msg(
+            "create_tracker requires confirm_billing=True. CallRail charges "
+            "per provisioned number (~$3/mo local, ~$3-5/mo toll-free; "
+            "session pools = pool_size × per-number cost). Pass "
+            "confirm_billing=True if you intend to incur this charge."
+        )
+    if type not in VALID_TRACKER_TYPES:
+        return _err_msg(f"type must be one of {VALID_TRACKER_TYPES}, got {type!r}")
+    if type == "source" and source_type not in VALID_SOURCE_TYPES:
+        return _err_msg(
+            f"source_type must be one of {VALID_SOURCE_TYPES}, got {source_type!r}. "
+            f"Note: 'google_ad_extension' is what Google Ads call extensions use; "
+            f"for general Google Ads / Bing Ads / Facebook DNI use type='session'."
+        )
+    if not toll_free and not area_code and type == "source":
+        return _err_msg("Provide area_code (e.g. '412') or set toll_free=True.")
+    if type == "session" and pool_size is None:
+        return _err_msg("type='session' requires pool_size (typical: 4-10).")
+
+    body: dict[str, Any] = {
+        "name": name,
+        "company_id": company_id,
+        "type": type,
+        "destination_number": destination_number,
+        "call_flow": {
+            "type": "basic",
+            "destination_number": destination_number,
+            "recording_enabled": recording_enabled,
+        },
+    }
+    if greeting_text is not None:
+        body["call_flow"]["greeting_text"] = greeting_text
+    if type == "source":
+        body["source"] = {"type": source_type}
+    tn: dict[str, Any] = {}
+    if toll_free:
+        tn["toll_free"] = True
+    elif area_code:
+        tn["area_code"] = area_code
+    if type == "session" and pool_size is not None:
+        tn["pool_size"] = pool_size
+    body["tracking_number"] = tn
+    if whisper_message is not None:
+        body["whisper_message"] = whisper_message
+    if sms_enabled is not None:
+        body["sms_enabled"] = sms_enabled
+
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.post(f"a/{aid}/trackers.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_tracker(
+    tracker_id: str,
+    account_id: str | None = None,
+    name: str | None = None,
+    destination_number: str | None = None,
+    whisper_message: str | None = None,
+    greeting_text: str | None = None,
+    sms_enabled: bool | None = None,
+) -> str:
+    """Update a tracker's mutable settings: name, destination, whisper, greeting, SMS.
+
+    Args:
+        tracker_id: 'TRK...' id.
+        account_id: Auto-resolves if omitted.
+        name: New display name.
+        destination_number: Where calls forward (e.g. "+14129548337"). Updates
+            the call_flow's destination too.
+        whisper_message: New whisper text.
+        greeting_text: New automated greeting.
+        sms_enabled: Toggle SMS on/off.
+
+    NOTE: Setting `status` via this PUT is silently ignored by CallRail.
+    To disable a tracker, use `delete_tracker(tracker_id)` (soft-delete /
+    disabled, keeps history). To permanently remove, contact CallRail support.
+    """
+    body: dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if destination_number is not None:
+        body["destination_number"] = destination_number
+        body["call_flow"] = {"type": "basic", "destination_number": destination_number}
+    if whisper_message is not None:
+        body["whisper_message"] = whisper_message
+    if greeting_text is not None:
+        body.setdefault("call_flow", {"type": "basic"})["greeting_text"] = greeting_text
+    if sms_enabled is not None:
+        body["sms_enabled"] = sms_enabled
+    if not body:
+        return _err_msg("No fields supplied to update.")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.put(f"a/{aid}/trackers/{tracker_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def delete_tracker(tracker_id: str, account_id: str | None = None) -> str:
+    """Delete (disable) a tracker. Soft-removes it from active trackers; the
+    tracker keeps its call history but stops receiving new calls. The
+    underlying phone number is released.
+
+    Args:
+        tracker_id: 'TRK...' id.
+        account_id: Auto-resolves if omitted.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        client.delete(f"a/{aid}/trackers/{tracker_id}.json")
+        return _ok({"deleted": True, "tracker_id": tracker_id})
     except CallRailError as e:
         return _err(e)
 
