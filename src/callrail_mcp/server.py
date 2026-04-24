@@ -142,6 +142,74 @@ def _digits_only(s: str) -> str:
     return "".join(ch for ch in s if ch.isdigit())
 
 
+# ---- Tracker validation helpers (used by create/update_tracker, list_trackers) ----
+
+# Per CallRail TTS limits (empirically observed; docs do not specify exact numeric caps).
+# Generous-but-not-crazy ceilings so we fail fast on absurd inputs instead of
+# burning a network round-trip and an API error.
+_MAX_TRACKER_NAME_LEN = 255
+_MAX_TTS_MESSAGE_LEN = 500  # whisper_message and greeting_text use TTS
+_VALID_TRACKER_STATUSES: tuple[str, ...] = ("active", "disabled")
+_AREA_CODE_RE = re.compile(r"^\d{3}$")
+# Loose E.164-ish: optional + then 10-15 digits. Accepts +14125551234, 14125551234.
+_PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+_TRACKER_ID_RE = re.compile(r"^TRK[A-Za-z0-9_-]+$")
+_COMPANY_ID_RE = re.compile(r"^COM[A-Za-z0-9_-]+$")
+
+
+def _require_non_empty(value: str | None, field_name: str) -> tuple[bool, str]:
+    """True only if value is a non-empty, non-whitespace string."""
+    if value is None or not str(value).strip():
+        return False, f"{field_name} is required and cannot be empty."
+    return True, ""
+
+
+def _validate_phone(value: str, field_name: str) -> tuple[bool, str]:
+    """Loose E.164-ish phone check. Avoids burning an API call on obvious garbage."""
+    if not _PHONE_RE.match(value.strip()):
+        return False, (
+            f"{field_name}={value!r} doesn't look like a phone number "
+            f"(expected E.164 format like '+14125551234' or '14125551234')."
+        )
+    return True, ""
+
+
+def _validate_area_code(value: str) -> tuple[bool, str]:
+    if not _AREA_CODE_RE.match(value):
+        return False, f"area_code={value!r} must be exactly 3 digits (e.g. '412')."
+    return True, ""
+
+
+def _validate_pool_size(value: int) -> tuple[bool, str]:
+    """Pool size sanity. CallRail prices each pool number, so cap aggressively
+    to prevent accidental 5-figure provisioning bills."""
+    if value < 1:
+        return False, f"pool_size={value} must be >= 1."
+    if value > 50:
+        return False, (
+            f"pool_size={value} exceeds safety cap of 50. "
+            f"If you really need this many, edit the cap in server.py."
+        )
+    return True, ""
+
+
+def _validate_length(value: str, field_name: str, max_len: int) -> tuple[bool, str]:
+    if len(value) > max_len:
+        return False, f"{field_name} length {len(value)} exceeds max {max_len}."
+    return True, ""
+
+
+def _validate_tracker_status(value: str | None) -> tuple[bool, str]:
+    """list_trackers' status filter. None = no filter."""
+    if value is None or value == "":
+        return True, ""
+    if value not in _VALID_TRACKER_STATUSES:
+        return False, (
+            f"status={value!r} must be one of {_VALID_TRACKER_STATUSES} or None."
+        )
+    return True, ""
+
+
 # ---- Tools ----
 
 @mcp.tool()
@@ -212,6 +280,9 @@ def list_trackers(
         status: Filter by status. Defaults to None (returns all, including
             soft-deleted/disabled). Common values: 'active', 'disabled'.
     """
+    ok, msg = _validate_tracker_status(status)
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
@@ -232,6 +303,9 @@ def get_tracker(tracker_id: str, account_id: str | None = None) -> str:
         tracker_id: 'TRK...' id.
         account_id: Auto-resolves if omitted.
     """
+    ok, msg = _require_non_empty(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/trackers/{tracker_id}.json"))
@@ -299,13 +373,30 @@ def create_tracker(
 
     Returns the created tracker including its newly-provisioned tracking_numbers.
     """
-    if not confirm_billing:
-        return _err_msg(
-            "create_tracker requires confirm_billing=True. CallRail charges "
-            "per provisioned number (~$3/mo local, ~$3-5/mo toll-free; "
-            "session pools = pool_size × per-number cost). Pass "
-            "confirm_billing=True if you intend to incur this charge."
-        )
+    # ---- Validate inputs BEFORE any network call. ----
+    # Required fields, non-empty.
+    for value, field in ((name, "name"), (company_id, "company_id"), (destination_number, "destination_number")):
+        ok, msg = _require_non_empty(value, field)
+        if not ok:
+            return _err_msg(msg)
+    # Length caps so we fast-fail instead of provisioning a number with
+    # absurd metadata or running a 5-minute TTS greeting.
+    ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
+    if not ok:
+        return _err_msg(msg)
+    if whisper_message is not None:
+        ok, msg = _validate_length(whisper_message, "whisper_message", _MAX_TTS_MESSAGE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if greeting_text is not None:
+        ok, msg = _validate_length(greeting_text, "greeting_text", _MAX_TTS_MESSAGE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    # destination_number format.
+    ok, msg = _validate_phone(destination_number, "destination_number")
+    if not ok:
+        return _err_msg(msg)
+    # Enum-valued fields.
     if type not in VALID_TRACKER_TYPES:
         return _err_msg(f"type must be one of {VALID_TRACKER_TYPES}, got {type!r}")
     if type == "source" and source_type not in VALID_SOURCE_TYPES:
@@ -314,10 +405,32 @@ def create_tracker(
             f"Note: 'google_ad_extension' is what Google Ads call extensions use; "
             f"for general Google Ads / Bing Ads / Facebook DNI use type='session'."
         )
+    # Tracking-number provisioning rules.
+    if toll_free and area_code:
+        return _err_msg(
+            "Cannot specify both toll_free=True and area_code. "
+            "Toll-free numbers don't have an area code; choose one."
+        )
     if not toll_free and not area_code and type == "source":
         return _err_msg("Provide area_code (e.g. '412') or set toll_free=True.")
-    if type == "session" and pool_size is None:
-        return _err_msg("type='session' requires pool_size (typical: 4-10).")
+    if area_code is not None:
+        ok, msg = _validate_area_code(area_code)
+        if not ok:
+            return _err_msg(msg)
+    if type == "session":
+        if pool_size is None:
+            return _err_msg("type='session' requires pool_size (typical: 4-10).")
+        ok, msg = _validate_pool_size(pool_size)
+        if not ok:
+            return _err_msg(msg)
+    # Billing confirmation last so the user sees real validation errors first.
+    if not confirm_billing:
+        return _err_msg(
+            "create_tracker requires confirm_billing=True. CallRail charges "
+            "per provisioned number (~$3/mo local, ~$3-5/mo toll-free; "
+            "session pools = pool_size × per-number cost). Pass "
+            "confirm_billing=True if you intend to incur this charge."
+        )
 
     body: dict[str, Any] = {
         "name": name,
@@ -344,8 +457,7 @@ def create_tracker(
     body["tracking_number"] = tn
     if whisper_message is not None:
         body["whisper_message"] = whisper_message
-    if sms_enabled is not None:
-        body["sms_enabled"] = sms_enabled
+    body["sms_enabled"] = sms_enabled
 
     try:
         aid = client.resolve_account_id(account_id)
@@ -373,13 +485,67 @@ def update_tracker(
         destination_number: Where calls forward (e.g. "+14129548337"). Updates
             the call_flow's destination too.
         whisper_message: New whisper text.
-        greeting_text: New automated greeting.
+        greeting_text: New automated greeting. **If supplied, you must also
+            supply destination_number** — CallRail's PUT /trackers replaces the
+            entire call_flow object, so updating only greeting_text would
+            silently zero out the destination, breaking the tracker.
         sms_enabled: Toggle SMS on/off.
+
+    Field-level rules:
+        - `name`, `destination_number`, `whisper_message`, `greeting_text`
+          must be non-empty strings if provided. Pass `None` (the default)
+          to leave a field unchanged.
 
     NOTE: Setting `status` via this PUT is silently ignored by CallRail.
     To disable a tracker, use `delete_tracker(tracker_id)` (soft-delete /
     disabled, keeps history). To permanently remove, contact CallRail support.
     """
+    # ---- Pre-network validation. ----
+    ok, msg = _require_non_empty(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
+    # Reject explicit empty strings on optional fields. (Callers should pass
+    # None to leave a field unchanged; "" is almost certainly a mistake.)
+    for value, field in (
+        (name, "name"),
+        (destination_number, "destination_number"),
+        (whisper_message, "whisper_message"),
+        (greeting_text, "greeting_text"),
+    ):
+        if value is not None:
+            ok, msg = _require_non_empty(value, field)
+            if not ok:
+                return _err_msg(msg)
+    # Length caps for TTS / display fields.
+    if name is not None:
+        ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if whisper_message is not None:
+        ok, msg = _validate_length(whisper_message, "whisper_message", _MAX_TTS_MESSAGE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if greeting_text is not None:
+        ok, msg = _validate_length(greeting_text, "greeting_text", _MAX_TTS_MESSAGE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    # destination_number format if provided.
+    if destination_number is not None:
+        ok, msg = _validate_phone(destination_number, "destination_number")
+        if not ok:
+            return _err_msg(msg)
+    # CRITICAL: greeting_text alone would replace call_flow with an object
+    # that's missing destination_number, breaking the tracker. CallRail's
+    # PUT /trackers does NOT do partial-merge inside call_flow, only at
+    # the top level. Force the caller to be explicit.
+    if greeting_text is not None and destination_number is None:
+        return _err_msg(
+            "Updating greeting_text requires also passing destination_number "
+            "(CallRail's PUT replaces the entire call_flow object — supplying "
+            "only greeting_text would zero out the destination). Pass both, "
+            "or call get_tracker first to read the existing destination_number."
+        )
+
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
@@ -389,7 +555,8 @@ def update_tracker(
     if whisper_message is not None:
         body["whisper_message"] = whisper_message
     if greeting_text is not None:
-        body.setdefault("call_flow", {"type": "basic"})["greeting_text"] = greeting_text
+        # destination_number guaranteed present by validation above.
+        body["call_flow"]["greeting_text"] = greeting_text
     if sms_enabled is not None:
         body["sms_enabled"] = sms_enabled
     if not body:
@@ -410,11 +577,18 @@ def delete_tracker(tracker_id: str, account_id: str | None = None) -> str:
     Args:
         tracker_id: 'TRK...' id.
         account_id: Auto-resolves if omitted.
+
+    Returns: An object with `deleted: True`, `tracker_id`, and `response`
+    (CallRail's body, which on success contains the disabled tracker record
+    including `disabled_at` timestamp). Empty object if CallRail returned 204.
     """
+    ok, msg = _require_non_empty(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        client.delete(f"a/{aid}/trackers/{tracker_id}.json")
-        return _ok({"deleted": True, "tracker_id": tracker_id})
+        result = client.delete(f"a/{aid}/trackers/{tracker_id}.json")
+        return _ok({"deleted": True, "tracker_id": tracker_id, "response": result})
     except CallRailError as e:
         return _err(e)
 
