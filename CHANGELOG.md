@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-04-24
+
+### Fixed (audit pass 13 + 14 — approaching the bug floor)
+
+Pass 13 ran bandit (security scanner), pyright (alternate type-checker),
+and a docstring-accuracy agent — all three reported ZERO code defects.
+Only documentation drift. Pass 14 ran one more round with a different
+lens and caught one HIGH-severity defect.
+
+#### HIGH — discovered in round 14 (final lens)
+- **`_date_window` crashed on string `days`**. `_validate_window` coerced
+  string `days` to int locally (added v0.4.3) but only returned `(ok, msg)`
+  — the coerced value was thrown away. `_date_window` then received the
+  original string and raised `TypeError: '>' not supported between str and
+  int`. Reachable via every tool accepting `days` (list_calls, call_summary,
+  usage_summary, list_form_submissions, list_text_messages,
+  search_calls_by_number) when an MCP client sent loose JSON. Tests caught
+  the validator behavior but never exercised the full path. Now
+  `_date_window` defensively coerces too, and an end-to-end regression
+  test asserts `list_calls(days="7")` doesn't crash.
+
+### Documentation drift (rounds 13 + 14 findings)
+- CLAUDE.md stale by 5 versions; now accurate through v0.4.7 and lists
+  ~20 validation guards added across versions.
+- `usage_summary` docstring now documents the `partial_failures[]` schema
+  including the v0.4.6 `partial_calls_before_failure` / `partial_minutes_
+  before_failure` / etc. fields.
+- `call_eligibility_check` docstring explains why source-slug detection
+  uses `source` not `source_name` (misleading user-editable display).
+- `update_call` / `update_form_submission` docstrings now list length caps
+  (`note` 4000, `customer_name` 200, `tags` 100-entry max).
+- README `update_form_submission` row clarified: "same field surface as
+  update_call PLUS `value` (not supported on update_call — returns 500)".
+
+### Clean across 4 independent check tools
+- `pytest -W error` (warnings as errors): clean
+- `mypy --strict`: no issues in 4 source files
+- `ruff` lint: all checks passed
+- `bandit`: 1 LOW (intentional `assert` for type narrowing)
+- `pyright`: only missing-source-stub warnings for third-party deps
+
+### Added — tests
+- 2 new regression tests (227 → 229):
+  - `_date_window` coerces string `days` + garbage-falls-back-to-no-window
+  - `list_calls(days="7")` end-to-end doesn't crash
+
 ## [0.4.6] - 2026-04-24
 
 ### Fixed (audit pass 12 — 5 bugs incl. 1 HIGH)

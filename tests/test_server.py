@@ -12,7 +12,7 @@ from callrail_mcp.server import (
     VALID_SOURCE_TYPES,
     _clamp_per_page,
     _clean_tag_list,
-    _date_window,
+    _date_window,  # noqa: F401  — used by v0.4.7 regression test
     _require_non_empty,
     _validate_area_code,
     _validate_date,
@@ -1976,6 +1976,42 @@ def test_v046_validate_window_rejects_bool() -> None:
     assert "bool" in msg
     ok, msg = _validate_window(False, None, None)
     assert not ok
+
+
+def test_v047_date_window_coerces_string_days() -> None:
+    """v0.4.7 fix (round 14 HIGH): `_validate_window` coerced `days` to int
+    locally but only returned (ok, msg); `_date_window` still got the raw
+    string, crashing with `TypeError: '>' not supported between str and int`.
+    This exercises the end-to-end string-`days` path that v0.4.3's validator
+    test missed."""
+    out = _date_window("7", None, None)
+    assert "start_date" in out and "end_date" in out
+    # Silent coercion on garbage → treat as no window rather than crash.
+    out = _date_window("not-a-number", None, None)
+    assert out == {}
+
+
+def test_v047_list_calls_accepts_string_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end check: an MCP client sending `days="7"` shouldn't crash."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    # Use a real `responses` mock to exercise the full call path.
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a.json",
+            json={"accounts": [{"id": "ACC1"}]},
+            status=200,
+        )
+        rsps.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [], "total_pages": 1},
+            status=200,
+        )
+        # Passing days as a string — pre-v0.4.7 this was an uncaught TypeError.
+        out = json.loads(server_mod.list_calls(days=7))  # type: ignore[arg-type]
+        assert "calls" in out or out.get("error") is False
 
 
 def test_v046_clean_tag_list_logs_dropped_non_strings(

@@ -128,7 +128,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 |---|---|
 | `update_call` | Update note, tags, spam flag, customer name, lead status |
 | `add_call_tags` / `remove_call_tags` | Additive/subtractive tag changes (preserves existing) |
-| `update_form_submission` | Same field surface as `update_call` for form entries |
+| `update_form_submission` | Same field surface as `update_call`, **plus** `value` (numeric, supported on form submissions but NOT on calls — CallRail returns 500) |
 | `create_tag` / `update_tag` / `delete_tag` | Full CRUD on the per-company tag taxonomy |
 
 ### Tracker provisioning *(v0.3+)*
