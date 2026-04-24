@@ -1144,6 +1144,351 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
+# ============================================================
+# Aggregation / agency-billing tools (no CallRail-specific endpoint;
+# we compose data from list_companies + list_trackers + list_calls).
+# ============================================================
+
+# CallRail Call Tracking Starter pricing (verified 2026-04-24 against the
+# user's own billing dashboard at /settings/.../account/billing). Update
+# these constants if you switch plans — they're public knowledge and not
+# CallRail-side configurable for the integration.
+PRICING_BASE_MONTHLY = 50.00
+PRICING_BUNDLED_NUMBERS = 5
+PRICING_BUNDLED_MINUTES = 250
+PRICING_BUNDLED_TEXTS = 25
+PRICING_PER_LOCAL_NUMBER = 3.00
+PRICING_PER_TOLLFREE_NUMBER = 5.00
+PRICING_PER_LOCAL_MINUTE = 0.05
+PRICING_PER_TOLLFREE_MINUTE = 0.08
+PRICING_PER_TEXT = 0.05  # estimated; CallRail doesn't enumerate this
+
+
+def _is_toll_free(number: str | None) -> bool:
+    """True for North American toll-free prefixes."""
+    if not number:
+        return False
+    digits = "".join(c for c in number if c.isdigit())
+    if len(digits) >= 4 and digits[0] == "1":
+        return digits[1:4] in {"800", "888", "877", "866", "855", "844", "833"}
+    return False
+
+
+@mcp.tool()
+def usage_summary(
+    account_id: str | None = None,
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
+    """Per-company cost-attribution summary for the current cycle.
+
+    Aggregates active trackers + per-company call minutes and projects what
+    each client is contributing to the agency's CallRail bill. Useful for:
+      - Deciding which client to renegotiate / upsell / drop
+      - Sanity-checking the upcoming invoice
+      - Quarterly reviews
+
+    Pricing assumes Call Tracking Starter ($50 base + 5 numbers + 250 mins
+    bundled; $3/local number, $5/toll-free number, $0.05/local minute,
+    $0.08/toll-free minute over bundle). Edit PRICING_* constants in
+    server.py if you're on a different plan.
+
+    Args:
+        account_id: Auto-resolves if omitted.
+        days: Lookback window in days (default 30 = roughly one cycle).
+            Ignored if `start_date` provided.
+        start_date: 'YYYY-MM-DD'.
+        end_date: 'YYYY-MM-DD' (defaults to today).
+
+    Returns: A breakdown of each company's minutes, active trackers,
+    estimated cost share, plus the agency total and bundle utilization.
+    Sorted by cost-share descending so the biggest user is on top.
+    """
+    ok, msg = _validate_window(days, start_date, end_date)
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        # 1. Pull all companies (single page, capped at 250 — agencies
+        # typically have <50 clients).
+        companies_resp = client.get(f"a/{aid}/companies.json", {"per_page": 250})
+        companies: list[dict[str, Any]] = companies_resp.get("companies", []) if isinstance(companies_resp, dict) else []
+        active_companies = [c for c in companies if c.get("status") == "active"]
+
+        # 2. Pull active trackers per company. Numbers/pool_size aggregate
+        # the count of provisioned numbers (CallRail bills per number, not
+        # per tracker — a session pool of 4 = 4 numbers).
+        # 3. Pull calls per company in the window for minute aggregation.
+        date_params = _date_window(days, start_date, end_date)
+        per_company: list[dict[str, Any]] = []
+
+        for c in active_companies:
+            cid = c.get("id")
+            if not cid:
+                continue
+            # Active trackers + their tracking numbers.
+            trackers_resp = client.get(
+                f"a/{aid}/trackers.json",
+                {"company_id": cid, "status": "active", "per_page": 250},
+            )
+            trackers = trackers_resp.get("trackers", []) if isinstance(trackers_resp, dict) else []
+            local_numbers = 0
+            toll_free_numbers = 0
+            for t in trackers:
+                for num in t.get("tracking_numbers") or []:
+                    if _is_toll_free(num):
+                        toll_free_numbers += 1
+                    else:
+                        local_numbers += 1
+            # Calls + minutes in window.
+            params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
+            calls_resp = client.get(f"a/{aid}/calls.json", params)
+            calls = calls_resp.get("calls", []) if isinstance(calls_resp, dict) else []
+            # Note: CallRail's `duration` is talk-time in seconds.
+            total_seconds = sum(int(call.get("duration") or 0) for call in calls)
+            minutes = round(total_seconds / 60.0, 1)
+            per_company.append({
+                "company_id": cid,
+                "name": c.get("name", "(unnamed)"),
+                "active_local_numbers": local_numbers,
+                "active_tollfree_numbers": toll_free_numbers,
+                "active_total_numbers": local_numbers + toll_free_numbers,
+                "minutes_in_window": minutes,
+                "calls_in_window": len(calls),
+            })
+
+        # 4. Compute cost shares. We attribute the bundle (5 numbers, 250
+        # minutes) proportionally to each company's contribution to the
+        # agency total — biggest users absorb more of the "free tier" but
+        # also more of the overage.
+        total_local = sum(c["active_local_numbers"] for c in per_company)
+        total_tollfree = sum(c["active_tollfree_numbers"] for c in per_company)
+        total_minutes = sum(c["minutes_in_window"] for c in per_company)
+        # Number-overage cost (charge only for numbers beyond bundle).
+        local_overage_count = max(0, total_local - PRICING_BUNDLED_NUMBERS)
+        # Toll-free numbers don't share the local-number bundle in
+        # CallRail's pricing — every TF is overage.
+        local_overage_cost = local_overage_count * PRICING_PER_LOCAL_NUMBER
+        tollfree_overage_cost = total_tollfree * PRICING_PER_TOLLFREE_NUMBER
+        # Minute-overage cost.
+        minute_overage_count = max(0.0, total_minutes - PRICING_BUNDLED_MINUTES)
+        minute_overage_cost = round(minute_overage_count * PRICING_PER_LOCAL_MINUTE, 2)
+        agency_total = round(
+            PRICING_BASE_MONTHLY + local_overage_cost + tollfree_overage_cost + minute_overage_cost,
+            2,
+        )
+        # Per-company attribution: split the bill proportionally by
+        # (numbers + minutes) contribution. Pure proportionality — not a
+        # perfect cost model (the bundle "rebates" larger users more) but
+        # it's a reasonable starting point.
+        if total_local + total_tollfree + total_minutes > 0:
+            for company_row in per_company:
+                # Numbers contribute proportionally to number-overage cost.
+                nums_share = (
+                    company_row["active_local_numbers"] / total_local
+                    if total_local > 0 else 0
+                )
+                tf_share = (
+                    company_row["active_tollfree_numbers"] / total_tollfree
+                    if total_tollfree > 0 else 0
+                )
+                mins_share = (
+                    company_row["minutes_in_window"] / total_minutes
+                    if total_minutes > 0 else 0
+                )
+                cost = (
+                    nums_share * local_overage_cost
+                    + tf_share * tollfree_overage_cost
+                    + mins_share * minute_overage_cost
+                )
+                # Each company's slice of the base subscription = their
+                # share of the total resources used.
+                resource_share = (
+                    (company_row["active_total_numbers"] + company_row["minutes_in_window"])
+                    / max(1, total_local + total_tollfree + total_minutes)
+                )
+                cost += resource_share * PRICING_BASE_MONTHLY
+                company_row["estimated_cost_share"] = round(cost, 2)
+        per_company.sort(key=lambda r: r.get("estimated_cost_share", 0), reverse=True)
+
+        return _ok({
+            "window": date_params or {"days": days},
+            "agency": {
+                "plan": "Call Tracking Starter",
+                "base_monthly": PRICING_BASE_MONTHLY,
+                "active_local_numbers": total_local,
+                "active_tollfree_numbers": total_tollfree,
+                "active_total_numbers": total_local + total_tollfree,
+                "bundled_numbers": PRICING_BUNDLED_NUMBERS,
+                "minutes_used": round(total_minutes, 1),
+                "bundled_minutes": PRICING_BUNDLED_MINUTES,
+                "local_overage_cost": round(local_overage_cost, 2),
+                "tollfree_overage_cost": round(tollfree_overage_cost, 2),
+                "minute_overage_cost": round(minute_overage_cost, 2),
+                "estimated_cycle_total": agency_total,
+            },
+            "by_company": per_company,
+            "biggest_cost_driver": (
+                per_company[0]["name"] if per_company else None
+            ),
+            "notes": [
+                "Number counts are CURRENT active counts (snapshot), not historical.",
+                "Minutes are aggregated over the requested window.",
+                "Per-company attribution splits the bill proportionally to "
+                "(numbers + minutes) contribution; a perfectly fair model would "
+                "credit larger users for absorbing more of the bundle.",
+                "Toll-free / local-number / minute thresholds and prices are "
+                "Starter plan rates as of 2026-04. Edit PRICING_* in server.py "
+                "if you switch plans.",
+            ],
+        })
+    except CallRailError as e:
+        return _err(e)
+
+
+# CallRail's Google Ads integration default minimum call duration to
+# upload a call as a conversion. Verified empirically by the user's own
+# Google Ads conversion-action settings (60 seconds across all phone-call
+# conversion actions in the Alan Construction account, 2026-04-24).
+GOOGLE_ADS_DEFAULT_MIN_CALL_DURATION_SECONDS = 60
+
+
+@mcp.tool()
+def call_eligibility_check(
+    call_id: str,
+    google_ads_min_duration_seconds: int = GOOGLE_ADS_DEFAULT_MIN_CALL_DURATION_SECONDS,
+    account_id: str | None = None,
+) -> str:
+    """Audit whether a specific call is/was eligible to count as a Google Ads
+    conversion. Useful for "where did my conversion go" debugging.
+
+    Checks:
+      1. Did the call have a `gclid`? (Required for CallRail to upload to
+         Google Ads as a UPLOAD_CLICKS Phone Call conversion.)
+      2. Was the call answered? (Most integrations skip unanswered.)
+      3. Did duration meet Google Ads' minimum? (Default 60s; configurable
+         per conversion action in Google Ads UI.)
+      4. Is the call from a Google source (vs Bing/GMB/organic) so a
+         Google Ads conversion would even apply?
+
+    Args:
+        call_id: 'CAL...' id.
+        google_ads_min_duration_seconds: Threshold to check duration against.
+            Defaults to 60 (Google's UI default). Override if you've lowered
+            it on a specific conversion action.
+        account_id: Auto-resolves if omitted.
+
+    Returns: Verdict + each criterion's pass/fail + suggested remediation
+    when eligibility fails.
+    """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    if google_ads_min_duration_seconds < 0:
+        return _err_msg(
+            f"google_ads_min_duration_seconds={google_ads_min_duration_seconds} "
+            f"must be non-negative."
+        )
+    try:
+        aid = client.resolve_account_id(account_id)
+        call_data = client.get(
+            f"a/{aid}/calls/{call_id}.json",
+            {
+                "fields": (
+                    "gclid,utm_source,utm_medium,duration,answered,"
+                    "source_name,first_call,landing_page_url"
+                )
+            },
+        )
+        if not isinstance(call_data, dict):
+            return _err_msg(f"Unexpected response shape from CallRail: {type(call_data).__name__}")
+
+        gclid = call_data.get("gclid")
+        utm_source = (call_data.get("utm_source") or "").lower()
+        source_name = (call_data.get("source_name") or "").lower()
+        duration = int(call_data.get("duration") or 0)
+        answered = bool(call_data.get("answered"))
+
+        # Heuristic: Google source means utm_source=google (paid + GMB),
+        # OR source_name contains 'google' (CallRail's named sources include
+        # 'GMB Alan...', 'Google Ads Assets', 'Alan Construction Website Pool'
+        # — the last is generic but usually has gclid when from Google).
+        is_google = (
+            utm_source == "google"
+            or "google" in source_name
+            or bool(gclid)  # gclid presence is the strongest Google signal
+        )
+
+        checks = {
+            "has_gclid": bool(gclid),
+            "answered": answered,
+            "duration_meets_threshold": duration >= google_ads_min_duration_seconds,
+            "is_google_source": is_google,
+        }
+        eligible = all(checks.values())
+
+        # Targeted remediation suggestions per failed check.
+        reasons: list[str] = []
+        if not checks["has_gclid"]:
+            reasons.append(
+                "No gclid captured — call cannot be uploaded as Google Ads "
+                "conversion. Likely from SERP call-extension (Google tracks "
+                "those natively as 'Calls from ads') or from a non-Google "
+                "source (GMB, organic, Bing)."
+            )
+        if not checks["answered"]:
+            reasons.append(
+                "Call was not answered. CallRail typically only uploads "
+                "answered calls."
+            )
+        if not checks["duration_meets_threshold"]:
+            reasons.append(
+                f"Call duration {duration}s is below the Google Ads "
+                f"threshold of {google_ads_min_duration_seconds}s. Either "
+                f"shorten the threshold in Google Ads conversion-action "
+                f"settings, or accept that quick calls don't count as leads."
+            )
+        if not checks["is_google_source"]:
+            reasons.append(
+                f"Call source ({source_name!r}, utm={utm_source!r}) doesn't "
+                f"appear to be Google. Bing calls go to Microsoft Ads, "
+                f"organic / GMB don't generate Google Ads conversions."
+            )
+
+        return _ok({
+            "call_id": call_id,
+            "google_ads_eligible": eligible,
+            "checks": checks,
+            "rejection_reasons": reasons,
+            "call_facts": {
+                "duration_seconds": duration,
+                "answered": answered,
+                "gclid": gclid,
+                "utm_source": call_data.get("utm_source"),
+                "source_name": call_data.get("source_name"),
+                "landing_page_url": call_data.get("landing_page_url"),
+                "first_call": call_data.get("first_call"),
+            },
+            "threshold_used": google_ads_min_duration_seconds,
+            "notes": [
+                "This tool checks LIKELY eligibility based on CallRail's "
+                "default integration behavior + Google Ads' default minimum "
+                "duration. Your actual configuration may differ — check "
+                "CallRail Integrations > Google Ads > Integration Filters.",
+                "SERP call-extension calls (where the user taps the phone "
+                "icon directly in a Google ad) are tracked by Google natively "
+                "as AD_CALL conversions, NOT through CallRail upload — so "
+                "lacking a gclid here doesn't mean Google didn't count them.",
+            ],
+        })
+    except CallRailError as e:
+        return _err(e)
+
+
 def main() -> None:
     """CLI entry point for stdio transport.
 

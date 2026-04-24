@@ -733,3 +733,263 @@ def test_list_trackers_with_status_filter(server_with_mock_client) -> None:
     json.loads(server_mod.list_trackers(status="active"))
     # Verify the status query param was forwarded.
     assert "status=active" in responses.calls[1].request.url
+
+
+# ============================================================
+# v0.4.0 — usage_summary
+# ============================================================
+
+def test_is_toll_free_helper() -> None:
+    from callrail_mcp.server import _is_toll_free
+    assert _is_toll_free("+18005551234") is True
+    assert _is_toll_free("+18885551234") is True
+    assert _is_toll_free("+18775551234") is True
+    assert _is_toll_free("+18335551234") is True
+    assert _is_toll_free("+14125551234") is False
+    assert _is_toll_free("+17245551234") is False
+    assert _is_toll_free(None) is False
+    assert _is_toll_free("") is False
+
+
+@responses.activate
+def test_usage_summary_aggregates_correctly(server_with_mock_client) -> None:
+    """End-to-end usage_summary: 2 companies, mix of trackers + calls."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # Companies
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_BIG", "name": "Big Client", "status": "active"},
+            {"id": "COM_SMALL", "name": "Small Client", "status": "active"},
+            {"id": "COM_DEAD", "name": "Dead Client", "status": "disabled"},
+        ]},
+        status=200,
+    )
+    # Big Client trackers (4 numbers in a session pool + 1 GMB local)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [
+            {"tracking_numbers": ["+14125551001", "+14125551002", "+14125551003", "+14125551004"]},
+            {"tracking_numbers": ["+14125551005"]},
+        ]},
+        status=200,
+
+    )
+    # Big Client calls (10 calls totaling 600 seconds = 10 minutes)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60} for _ in range(10)]},
+        status=200,
+
+    )
+    # Small Client trackers (1 toll-free)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [{"tracking_numbers": ["+18005556666"]}]},
+        status=200,
+
+    )
+    # Small Client calls (2 calls × 30s = 1 minute)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 30}, {"duration": 30}]},
+        status=200,
+
+    )
+    out = json.loads(server_mod.usage_summary(days=30))
+    assert "agency" in out
+    agency = out["agency"]
+    assert agency["active_local_numbers"] == 5
+    assert agency["active_tollfree_numbers"] == 1
+    assert agency["active_total_numbers"] == 6
+    assert agency["minutes_used"] == 11.0  # 10 + 1
+    # Disabled company excluded.
+    assert len(out["by_company"]) == 2
+    # Big Client should be biggest cost driver.
+    assert out["biggest_cost_driver"] == "Big Client"
+    # Sorted: Big Client first.
+    assert out["by_company"][0]["name"] == "Big Client"
+
+
+def test_usage_summary_rejects_negative_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.usage_summary(days=-7))
+    assert out["error"] is True
+    assert "negative" in out["message"]
+
+
+def test_usage_summary_rejects_swapped_dates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.usage_summary(start_date="2026-04-30", end_date="2026-04-01"))
+    assert out["error"] is True
+    assert "before start_date" in out["message"]
+
+
+# ============================================================
+# v0.4.0 — call_eligibility_check
+# ============================================================
+
+def test_call_eligibility_check_rejects_empty_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.call_eligibility_check(call_id=""))
+    assert out["error"] is True
+
+
+def test_call_eligibility_check_rejects_negative_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(
+        server_mod.call_eligibility_check(call_id="CAL_x", google_ads_min_duration_seconds=-1)
+    )
+    assert out["error"] is True
+    assert "non-negative" in out["message"]
+
+
+def test_call_eligibility_check_rejects_path_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_x/../admin"))
+    assert out["error"] is True
+    assert "may not contain" in out["message"]
+
+
+@responses.activate
+def test_call_eligibility_check_eligible_call(server_with_mock_client) -> None:
+    """A 90s answered call from Google with a gclid: should pass all checks."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_GOOD.json",
+        json={
+            "gclid": "CjwK_test",
+            "utm_source": "google",
+            "utm_medium": "cpc",
+            "duration": 90,
+            "answered": True,
+            "source_name": "Alan Construction Website Pool",
+        },
+        status=200,
+
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_GOOD"))
+    assert out["google_ads_eligible"] is True
+    assert out["checks"]["has_gclid"] is True
+    assert out["checks"]["answered"] is True
+    assert out["checks"]["duration_meets_threshold"] is True
+    assert out["checks"]["is_google_source"] is True
+    assert out["rejection_reasons"] == []
+
+
+@responses.activate
+def test_call_eligibility_check_short_call_rejected(server_with_mock_client) -> None:
+    """The exact Pittsburgh Z PA scenario from 2026-04-24: 58s answered with
+    valid gclid → should fail on duration_meets_threshold."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_PGH.json",
+        json={
+            "gclid": "CjwKCAjw_real",
+            "utm_source": None,
+            "duration": 58,
+            "answered": True,
+            "source_name": "Alan Construction Website Pool",
+        },
+        status=200,
+
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_PGH"))
+    assert out["google_ads_eligible"] is False
+    assert out["checks"]["duration_meets_threshold"] is False
+    # All other checks pass.
+    assert out["checks"]["has_gclid"] is True
+    assert out["checks"]["answered"] is True
+    assert out["checks"]["is_google_source"] is True
+    # Targeted rejection reason mentions duration + threshold.
+    reasons_str = " ".join(out["rejection_reasons"])
+    assert "58s" in reasons_str
+    assert "60s" in reasons_str
+
+
+@responses.activate
+def test_call_eligibility_check_no_gclid_rejected(server_with_mock_client) -> None:
+    """A GMB-organic call (no gclid): cannot upload to Google Ads."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_GMB.json",
+        json={
+            "gclid": None,
+            "utm_source": "google",
+            "duration": 120,
+            "answered": True,
+            "source_name": "GMB Alan Construction",
+        },
+        status=200,
+
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_GMB"))
+    assert out["google_ads_eligible"] is False
+    assert out["checks"]["has_gclid"] is False
+    reasons_str = " ".join(out["rejection_reasons"])
+    assert "gclid" in reasons_str.lower()
+
+
+@responses.activate
+def test_call_eligibility_check_custom_threshold(server_with_mock_client) -> None:
+    """A 30s call passes if user lowered Google's threshold to 15s."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_SHORT.json",
+        json={
+            "gclid": "CjwK_x",
+            "duration": 30,
+            "answered": True,
+            "source_name": "google",
+        },
+        status=200,
+
+    )
+    out = json.loads(
+        server_mod.call_eligibility_check(call_id="CAL_SHORT", google_ads_min_duration_seconds=15)
+    )
+    assert out["google_ads_eligible"] is True
+    assert out["threshold_used"] == 15

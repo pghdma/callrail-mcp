@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-24
+
+### Added — agency aggregation tools
+
+Two new tools that are pure reads (zero write cost, zero provisioning) but
+add real agency-level utility.
+
+- **`usage_summary(days=30)`** — per-company cost attribution for the
+  current CallRail cycle. Aggregates active trackers + per-company
+  call-minute totals + projects estimated cost share under Call Tracking
+  Starter pricing ($50 base + 5 numbers + 250 mins bundled; $3/local,
+  $5/toll-free, $0.05/min over bundle). Returns a sorted breakdown
+  showing who's driving the bill. Useful for: "which client is burning
+  my CallRail budget", quarterly reviews, upsell / renegotiation
+  signals. Pricing constants are editable in `server.py` for other plans.
+
+- **`call_eligibility_check(call_id, google_ads_min_duration_seconds=60)`**
+  — audits whether a specific call is/was eligible to count as a
+  Google Ads conversion. Checks: `gclid` presence, answered status,
+  duration vs. Google's threshold, source (Google vs Bing/GMB/organic).
+  Returns verdict + per-check pass/fail + targeted remediation text
+  when eligibility fails. Built specifically to short-circuit
+  conversion-debug sessions like "this 58-second answered call with a
+  gclid doesn't show in Google Ads, why?".
+
+### Added — tests
+
+- 11 new unit tests (143 → 154 total):
+  - 1 for `_is_toll_free` helper (number-type detection)
+  - 3 for `usage_summary` (aggregation correctness, negative-days
+    rejection, swapped-dates rejection)
+  - 7 for `call_eligibility_check` (all happy + rejection paths,
+    including the exact 58-second Pittsburgh Z PA scenario from
+    2026-04-24 that motivated building the tool)
+
+### Changed
+
+- README updated to reflect all 26 tools across 4 categories (read,
+  write, tracker provisioning, agency aggregation). Previous README was
+  stale since v0.1.0 and listed only 12 tools.
+- Added agency-specific example prompts to README: cost attribution +
+  conversion debugging + provisioning.
+
 ## [0.3.3] - 2026-04-24
 
 ### Fixed (live-verification findings — round 2 of v0.3.2)
