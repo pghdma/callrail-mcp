@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-04-24
+
+### Fixed (audit pass 11 — diminishing returns territory, but still 6 bugs)
+
+- **`call_eligibility_check` source detection had a dead clause + missed
+  bare `source="google"`** (F2). The redundant `source_slug == "google_my_business"`
+  was already covered by the `startswith("google_")` check. And bare `"google"`
+  (no underscore — rare but valid CallRail slug) was missed entirely.
+- **`usage_summary` companies list was unpaginated** (F11) → silently
+  truncated agencies with >250 active companies. Now uses `client.paginate`.
+- **`paginate()` blindly trusted server-reported `total_pages`** (F3).
+  A misbehaving server returning `total_pages: 999999` wouldn't be capped
+  by `max_pages`. Now `total_pages` is clamped at `max_pages`.
+- **`PRICING_PER_TOLLFREE_MINUTE` constant was defined but never used**
+  (F12). Replaced with a comment documenting the limitation (we don't
+  yet differentiate per-call pricing by tracker number type).
+
+### Added — tests
+
+- 3 new unit tests (220 → 223 total):
+  - `paginate()` defensive cap on runaway `total_pages`
+  - `is_google` accepts bare `source="google"` slug
+  - `usage_summary` companies list paginates correctly
+- Strengthened `test_v044_call_eligibility_uses_source_slug` to assert
+  `source` is in the `fields=` URL (catches future refactor regressions).
+
 ## [0.4.4] - 2026-04-24
 
 ### Fixed (audit pass 10 — adversarial fuzzing + cross-tool consistency)

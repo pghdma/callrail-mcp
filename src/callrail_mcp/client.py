@@ -189,7 +189,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.4.4 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.4.5 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -436,7 +436,11 @@ class CallRailClient:
             # `data.get("total_pages", 1)` which silently truncated to
             # page 1 whenever total_pages was missing.
             total_pages = data.get("total_pages")
-            if total_pages and page >= total_pages:
+            # Defensive: don't trust server-reported total_pages above
+            # max_pages. A misbehaving / misconfigured server returning
+            # `total_pages: 999999` shouldn't pin the iterator against the
+            # caller's intended cap — just stop at max_pages.
+            if total_pages and page >= min(total_pages, max_pages):
                 break
             page += 1
         else:

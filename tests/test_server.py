@@ -768,7 +768,7 @@ def test_usage_summary_aggregates_correctly(server_with_mock_client) -> None:
             {"id": "COM_BIG", "name": "Big Client", "status": "active"},
             {"id": "COM_SMALL", "name": "Small Client", "status": "active"},
             {"id": "COM_DEAD", "name": "Dead Client", "status": "disabled"},
-        ]},
+        ], "total_pages": 1},
         status=200,
     )
     # Big Client trackers (4 numbers in a session pool + 1 GMB local)
@@ -989,7 +989,7 @@ def test_usage_summary_paginates_calls(server_with_mock_client) -> None:
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/companies.json",
-        json={"companies": [{"id": "COM_BIG", "name": "Big Client", "status": "active"}]},
+        json={"companies": [{"id": "COM_BIG", "name": "Big Client", "status": "active"}], "total_pages": 1},
         status=200,
     )
     # Trackers: single page, 1 number.
@@ -1034,7 +1034,7 @@ def test_usage_summary_partial_failure_per_company(server_with_mock_client) -> N
         json={"companies": [
             {"id": "COM_OK", "name": "Working", "status": "active"},
             {"id": "COM_FAIL", "name": "Broken", "status": "active"},
-        ]},
+        ], "total_pages": 1},
         status=200,
     )
     # Working company: trackers + calls succeed.
@@ -1312,7 +1312,7 @@ def test_v043_cost_shares_sum_to_agency_total(server_with_mock_client) -> None:
             {"id": "COM_A", "name": "A", "status": "active"},
             {"id": "COM_B", "name": "B", "status": "active"},
             {"id": "COM_C", "name": "C", "status": "active"},
-        ]},
+        ], "total_pages": 1},
         status=200,
     )
     # Each company: 0 trackers, 1 minute (60s call).
@@ -1804,6 +1804,10 @@ def test_v044_call_eligibility_uses_source_slug(monkeypatch: pytest.MonkeyPatch)
         out = json.loads(server_mod.call_eligibility_check(call_id="CAL_BING"))
         assert out["checks"]["is_google_source"] is False
         assert out["call_facts"]["source"] == "bing_paid"
+        # F8 fix (audit pass 11): make sure `source` is actually in the
+        # fields= URL query — if a refactor drops it, this test would
+        # silently pass on the mock alone otherwise.
+        assert "source" in rsps.calls[1].request.url
 
 
 @responses.activate
@@ -1837,6 +1841,108 @@ def test_v044_err_handles_bytes_body() -> None:
     out = json.loads(server_mod._err(e))
     # Should not raise; body should be decoded with replacement chars.
     assert isinstance(out["body"], str)
+
+
+# ============================================================
+# v0.4.5 — Audit pass 11 fixes
+# ============================================================
+
+@responses.activate
+def test_v045_paginate_caps_runaway_total_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.4.5 defensive: a misbehaving server returning total_pages=999999
+    shouldn't pin the iterator past max_pages."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    # Each page returns 1 call but claims total_pages=999999.
+    for _ in range(3):
+        responses.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [{"id": "CAL_x"}], "total_pages": 999999},
+            status=200,
+        )
+    items = list(
+        server_mod.client.paginate(
+            "a/ACC1/calls.json", {"per_page": 1}, items_key="calls", max_pages=3
+        )
+    )
+    # Should stop at max_pages=3, not chase 999999.
+    assert len(items) == 3
+
+
+@responses.activate
+def test_v045_call_eligibility_bare_google_source(server_with_mock_client) -> None:
+    """v0.4.5 fix (F2): source='google' (no underscore) should be
+    detected as Google. Pre-fix only `startswith('google_')` matched."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_G.json",
+        json={
+            "gclid": None,
+            "duration": 90,
+            "answered": True,
+            "source": "google",  # bare, no underscore
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_G"))
+    assert out["checks"]["is_google_source"] is True
+
+
+@responses.activate
+def test_v045_usage_summary_paginates_companies(server_with_mock_client) -> None:
+    """v0.4.5 fix (F11): companies list now paginated. Pre-fix would
+    silently truncate at 250 companies (single-page request)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # Page 1: 2 companies
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_A", "name": "A", "status": "active"},
+            {"id": "COM_B", "name": "B", "status": "active"},
+        ], "total_pages": 2},
+        status=200,
+    )
+    # Page 2: 1 more
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_C", "name": "C", "status": "active"},
+        ], "total_pages": 2},
+        status=200,
+    )
+    # Each company gets a trackers + calls call.
+    for _ in range(3):
+        responses.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/trackers.json",
+            json={"trackers": [], "total_pages": 1},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [], "total_pages": 1},
+            status=200,
+        )
+    out = json.loads(server_mod.usage_summary(days=30))
+    # All 3 companies counted, not just first 2.
+    assert len(out["by_company"]) == 3
 
 
 @responses.activate
