@@ -152,6 +152,16 @@ def _validate_window(
             return False, f"days={days!r} is not a valid integer."
     if days is not None and days < 0:
         return False, f"days={days} is negative."
+    # Sanity cap. Without this, an exotic input like `days=10**18` would
+    # propagate to `timedelta(days=10**18)` and raise an uncaught
+    # OverflowError, crashing the MCP tool reply (the tool body's
+    # `try/except CallRailError` doesn't catch OverflowError). 36500
+    # days = 100 years; CallRail's data retention is far smaller and any
+    # request beyond it is almost certainly a typo.
+    if days is not None and days > 36500:
+        return False, (
+            f"days={days} exceeds maximum lookback of 36500 (~100 years)."
+        )
     ok, msg = _validate_date(start_date or "", "start_date")
     if not ok:
         return False, msg

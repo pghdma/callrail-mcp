@@ -1978,6 +1978,18 @@ def test_v046_validate_window_rejects_bool() -> None:
     assert not ok
 
 
+def test_v047_validate_window_caps_huge_days() -> None:
+    """v0.4.7 fix (round 16): days=10**18 was passing _validate_window
+    (only floors at 0) and crashing _date_window with OverflowError from
+    timedelta(days=10**18)."""
+    ok, msg = _validate_window(10**18, None, None)
+    assert not ok
+    assert "36500" in msg or "lookback" in msg
+    # Boundary: 36500 itself is allowed.
+    ok, _ = _validate_window(36500, None, None)
+    assert ok
+
+
 def test_v047_date_window_coerces_string_days() -> None:
     """v0.4.7 fix (round 14 HIGH): `_validate_window` coerced `days` to int
     locally but only returned (ok, msg); `_date_window` still got the raw
@@ -2010,7 +2022,9 @@ def test_v047_list_calls_accepts_string_days(monkeypatch: pytest.MonkeyPatch) ->
             status=200,
         )
         # Passing days as a string — pre-v0.4.7 this was an uncaught TypeError.
-        out = json.loads(server_mod.list_calls(days=7))  # type: ignore[arg-type]
+        # Note: live MCP clients almost always get per_page/days coerced by
+        # FastMCP before dispatch, but in-process callers can send strings.
+        out = json.loads(server_mod.list_calls(days="7"))  # type: ignore[arg-type]
         assert "calls" in out or out.get("error") is False
 
 

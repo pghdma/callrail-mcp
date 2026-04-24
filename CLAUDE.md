@@ -63,7 +63,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.4.7
+## Current version: 0.4.8
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -79,9 +79,10 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.4.4` — Unicode-invisible char rejection, source-slug detection, extension stripping
 - `0.4.5` — paginate companies, defensive total_pages cap
 - `0.4.6` — partial-failure surfaces accumulated minutes (silent data loss fix), bool rejected as days, is_toll_free handles formatted numbers
-- `0.4.7` — string-`days` no longer crashes `_date_window` (validator coerced locally but didn't propagate); docstrings updated to reflect length caps + source-slug semantics
+- `0.4.7` — string-`days` no longer crashes `_date_window`; docstrings updated for length caps + source-slug semantics
+- `0.4.8` — `days=10**18` no longer raises uncaught OverflowError from `timedelta` (now capped at 36500/100yr in `_validate_window`)
 
-**Tests: 229 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 230 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 
