@@ -15,6 +15,7 @@ Run standalone for stdio transport:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -1208,6 +1209,16 @@ def usage_summary(
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
         return _err_msg(msg)
+    # Reject days<=0 unless the caller provided explicit dates. Without
+    # this guard, _date_window returns {} and CallRail would page through
+    # all-time call history, blowing up the minute total + over-estimating
+    # cost wildly.
+    if (days is None or days <= 0) and not start_date:
+        return _err_msg(
+            "usage_summary requires either days>=1 or an explicit start_date "
+            "(otherwise we'd aggregate all-time call history and the cost "
+            "estimate would be meaningless)."
+        )
     try:
         aid = client.resolve_account_id(account_id)
         # 1. Pull all companies (single page, capped at 250 — agencies
@@ -1220,43 +1231,69 @@ def usage_summary(
         # the count of provisioned numbers (CallRail bills per number, not
         # per tracker — a session pool of 4 = 4 numbers).
         # 3. Pull calls per company in the window for minute aggregation.
+        # Both use paginate() — a busy client easily exceeds 250 calls in
+        # a 30-day window (Malick at ~800 minutes was definitely truncated
+        # before we wired up pagination).
         date_params = _date_window(days, start_date, end_date)
         per_company: list[dict[str, Any]] = []
+        partial_failures: list[dict[str, Any]] = []
 
         for c in active_companies:
             cid = c.get("id")
             if not cid:
                 continue
-            # Active trackers + their tracking numbers.
-            trackers_resp = client.get(
-                f"a/{aid}/trackers.json",
-                {"company_id": cid, "status": "active", "per_page": 250},
-            )
-            trackers = trackers_resp.get("trackers", []) if isinstance(trackers_resp, dict) else []
-            local_numbers = 0
-            toll_free_numbers = 0
-            for t in trackers:
-                for num in t.get("tracking_numbers") or []:
-                    if _is_toll_free(num):
-                        toll_free_numbers += 1
-                    else:
-                        local_numbers += 1
-            # Calls + minutes in window.
-            params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
-            calls_resp = client.get(f"a/{aid}/calls.json", params)
-            calls = calls_resp.get("calls", []) if isinstance(calls_resp, dict) else []
-            # Note: CallRail's `duration` is talk-time in seconds.
-            total_seconds = sum(int(call.get("duration") or 0) for call in calls)
-            minutes = round(total_seconds / 60.0, 1)
-            per_company.append({
-                "company_id": cid,
-                "name": c.get("name", "(unnamed)"),
-                "active_local_numbers": local_numbers,
-                "active_tollfree_numbers": toll_free_numbers,
-                "active_total_numbers": local_numbers + toll_free_numbers,
-                "minutes_in_window": minutes,
-                "calls_in_window": len(calls),
-            })
+            try:
+                # Active trackers + their tracking numbers (paginated).
+                trackers = list(
+                    client.paginate(
+                        f"a/{aid}/trackers.json",
+                        {"company_id": cid, "status": "active", "per_page": 250},
+                        items_key="trackers",
+                    )
+                )
+                local_numbers = 0
+                toll_free_numbers = 0
+                for t in trackers:
+                    for num in t.get("tracking_numbers") or []:
+                        if _is_toll_free(num):
+                            toll_free_numbers += 1
+                        else:
+                            local_numbers += 1
+                # Calls + minutes in window (paginated). Critical: without
+                # this, big clients silently truncate at 250 calls.
+                call_params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
+                total_seconds = 0
+                call_count = 0
+                for call in client.paginate(
+                    f"a/{aid}/calls.json", call_params, items_key="calls"
+                ):
+                    call_count += 1
+                    # Robust int coercion — CallRail returns int but defend
+                    # against future changes that ship strings/floats.
+                    raw_duration = call.get("duration") or 0
+                    # Skip malformed durations rather than crash the report.
+                    with contextlib.suppress(TypeError, ValueError):
+                        total_seconds += int(float(raw_duration))
+                minutes = round(total_seconds / 60.0, 1)
+                per_company.append({
+                    "company_id": cid,
+                    "name": c.get("name", "(unnamed)"),
+                    "active_local_numbers": local_numbers,
+                    "active_tollfree_numbers": toll_free_numbers,
+                    "active_total_numbers": local_numbers + toll_free_numbers,
+                    "minutes_in_window": minutes,
+                    "calls_in_window": call_count,
+                })
+            except CallRailError as e:
+                # Per-company partial-success: don't let one company's
+                # transient failure poison the whole agency report.
+                partial_failures.append({
+                    "company_id": cid,
+                    "company_name": c.get("name", "(unnamed)"),
+                    "error": str(e),
+                    "status": e.status,
+                })
+                continue
 
         # 4. Compute cost shares. We attribute the bundle (5 numbers, 250
         # minutes) proportionally to each company's contribution to the
@@ -1281,35 +1318,42 @@ def usage_summary(
         # Per-company attribution: split the bill proportionally by
         # (numbers + minutes) contribution. Pure proportionality — not a
         # perfect cost model (the bundle "rebates" larger users more) but
-        # it's a reasonable starting point.
-        if total_local + total_tollfree + total_minutes > 0:
-            for company_row in per_company:
-                # Numbers contribute proportionally to number-overage cost.
-                nums_share = (
-                    company_row["active_local_numbers"] / total_local
-                    if total_local > 0 else 0
-                )
-                tf_share = (
-                    company_row["active_tollfree_numbers"] / total_tollfree
-                    if total_tollfree > 0 else 0
-                )
-                mins_share = (
-                    company_row["minutes_in_window"] / total_minutes
-                    if total_minutes > 0 else 0
-                )
-                cost = (
-                    nums_share * local_overage_cost
-                    + tf_share * tollfree_overage_cost
-                    + mins_share * minute_overage_cost
-                )
-                # Each company's slice of the base subscription = their
-                # share of the total resources used.
+        # it's a reasonable starting point. ALWAYS attribute base cost so
+        # `sum(per-company costs) == agency_total` even when minutes==0.
+        for company_row in per_company:
+            # Per-bucket overage shares.
+            nums_share = (
+                company_row["active_local_numbers"] / total_local
+                if total_local > 0 else 0
+            )
+            tf_share = (
+                company_row["active_tollfree_numbers"] / total_tollfree
+                if total_tollfree > 0 else 0
+            )
+            mins_share = (
+                company_row["minutes_in_window"] / total_minutes
+                if total_minutes > 0 else 0
+            )
+            cost = (
+                nums_share * local_overage_cost
+                + tf_share * tollfree_overage_cost
+                + mins_share * minute_overage_cost
+            )
+            # Base attribution: prefer (numbers+minutes) blended share.
+            # If neither numbers nor minutes exist on any company, fall
+            # back to even split — the base is owed regardless.
+            denom = total_local + total_tollfree + total_minutes
+            if denom > 0:
                 resource_share = (
                     (company_row["active_total_numbers"] + company_row["minutes_in_window"])
-                    / max(1, total_local + total_tollfree + total_minutes)
+                    / denom
                 )
-                cost += resource_share * PRICING_BASE_MONTHLY
-                company_row["estimated_cost_share"] = round(cost, 2)
+            elif per_company:
+                resource_share = 1.0 / len(per_company)
+            else:
+                resource_share = 0.0
+            cost += resource_share * PRICING_BASE_MONTHLY
+            company_row["estimated_cost_share"] = round(cost, 2)
         per_company.sort(key=lambda r: r.get("estimated_cost_share", 0), reverse=True)
 
         return _ok({
@@ -1332,12 +1376,22 @@ def usage_summary(
             "biggest_cost_driver": (
                 per_company[0]["name"] if per_company else None
             ),
+            "partial_failures": partial_failures,
             "notes": [
                 "Number counts are CURRENT active counts (snapshot), not historical.",
-                "Minutes are aggregated over the requested window.",
+                "Minutes are aggregated over the requested window via paginated "
+                "calls (no truncation).",
                 "Per-company attribution splits the bill proportionally to "
                 "(numbers + minutes) contribution; a perfectly fair model would "
                 "credit larger users for absorbing more of the bundle.",
+                "Toll-free minute pricing ($0.08 vs $0.05 local) is NOT yet "
+                "differentiated — all minutes priced at local rate. Negligible "
+                "for accounts without toll-free numbers.",
+                "SMS overage is not included in the cost estimate.",
+                "Partial failures (per-company API errors) appear in "
+                "`partial_failures`; companies in that list are excluded from "
+                "totals, so the agency_total may under-estimate by the failed "
+                "companies' share.",
                 "Toll-free / local-number / minute thresholds and prices are "
                 "Starter plan rates as of 2026-04. Edit PRICING_* in server.py "
                 "if you switch plans.",
@@ -1385,7 +1439,7 @@ def call_eligibility_check(
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
         return _err_msg(msg)
-    ok, msg = _validate_id_shape(call_id, "call_id")
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
     if not ok:
         return _err_msg(msg)
     if google_ads_min_duration_seconds < 0:
@@ -1410,17 +1464,34 @@ def call_eligibility_check(
         gclid = call_data.get("gclid")
         utm_source = (call_data.get("utm_source") or "").lower()
         source_name = (call_data.get("source_name") or "").lower()
-        duration = int(call_data.get("duration") or 0)
-        answered = bool(call_data.get("answered"))
+        # Robust int coercion — CallRail returns int but defend against
+        # future schema changes (string/float).
+        raw_duration = call_data.get("duration") or 0
+        try:
+            duration = int(float(raw_duration))
+        except (TypeError, ValueError):
+            duration = 0
+        # `answered` may arrive as bool, "true"/"false" string, or int.
+        raw_answered = call_data.get("answered")
+        if isinstance(raw_answered, str):
+            answered = raw_answered.strip().lower() in ("true", "yes", "1")
+        else:
+            answered = bool(raw_answered)
 
-        # Heuristic: Google source means utm_source=google (paid + GMB),
-        # OR source_name contains 'google' (CallRail's named sources include
-        # 'GMB Alan...', 'Google Ads Assets', 'Alan Construction Website Pool'
-        # — the last is generic but usually has gclid when from Google).
+        # Heuristic: Google source = utm_source=google (GMB + paid) OR
+        # source_name contains 'google' (CallRail named sources like
+        # 'GMB ...', 'Google Ads Assets') OR has gclid. The gclid signal
+        # is honest: "gclid" stands for Google Click ID — it can only be
+        # minted by Google Ads. So presence proves Google origin even
+        # when CallRail's source_name is generic (e.g. "Website Pool"
+        # for a DNI session that happens to have served a Google Ads
+        # visitor). The redundancy with `has_gclid` is intentional —
+        # consumers may want to know "is this a Google call at all"
+        # independent of "did Google's tracking specifically capture it".
         is_google = (
             utm_source == "google"
             or "google" in source_name
-            or bool(gclid)  # gclid presence is the strongest Google signal
+            or bool(gclid)
         )
 
         checks = {

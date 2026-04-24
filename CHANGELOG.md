@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-24
+
+### Fixed (3-round audit pass on v0.4.0 tools)
+
+A focused 3-round audit on `usage_summary` and `call_eligibility_check`
+surfaced 1 CRITICAL + 1 HIGH + 4 MEDIUM bugs. All fixed.
+
+#### CRITICAL — confirmed in production data
+- **`usage_summary` was silently truncating call counts at 250 per
+  company.** Used a single `client.get(... per_page=250)` instead of
+  paginating. Live evidence: Malick + Stewart both showed exactly 250
+  calls in v0.4.0 output (the page-1 ceiling). The agency total
+  underestimate was ~$44 ($132 vs the real ~$176 from the billing
+  dashboard). Now uses `client.paginate()` for both calls AND trackers
+  loops — no truncation regardless of cycle volume.
+
+#### HIGH
+- **Cost attribution missed the base subscription when no minutes were
+  used.** When `total_minutes == 0`, the entire attribution block was
+  skipped, leaving every company's `estimated_cost_share` unset and the
+  $50 base unattributed. Now always attributes base; falls back to
+  even-N-way split when no resource signal is available.
+
+#### MEDIUM
+- **Per-company API failures poisoned the whole report.** One company
+  hitting a 503 → entire `usage_summary` errors out. Now per-company
+  try/except; failures collected in a `partial_failures: [...]` field
+  in the response so the rest of the agency report still ships.
+- **`days=0` (or negative) with no explicit dates** would have made
+  `_date_window` return empty params → CallRail returns ALL-TIME call
+  history → cost estimate based on years of minutes. Now rejected
+  with a clear error.
+- **Duration parsing was fragile.** `int(call_data.get("duration"))`
+  would crash on float-strings like `"60.5"`. Same for `bool(answered)`
+  on string `"true"`. Both now safely coerced.
+- **`call_eligibility_check` didn't enforce `CAL` prefix on
+  `call_id`.** Now uses `_validate_id_shape(prefix="CAL")` to fail-fast
+  on bogus IDs.
+
+### Considered + rejected
+- The audit suggested removing `bool(gclid)` from the `is_google` source
+  heuristic, claiming it tautologically tracks `has_gclid`. Rejected:
+  gclid stands for "Google Click ID" and is only minted by Google Ads
+  — its presence is honest signal that the call originated from Google,
+  even when CallRail's `source_name` is generic ("Website Pool" for
+  DNI sessions). Kept as-is with extended comment explaining why.
+
+### Added — tests
+
+- 5 new tests (154 → 159 total):
+  - `test_usage_summary_paginates_calls` — proves >250 calls now counted
+  - `test_usage_summary_partial_failure_per_company` — proves one bad
+    company doesn't poison the report
+  - `test_usage_summary_rejects_zero_days_without_dates`
+  - `test_call_eligibility_check_safe_duration_coercion` — float-string
+    + string-boolean inputs handled
+  - `test_call_eligibility_check_requires_CAL_prefix`
+
 ## [0.4.0] - 2026-04-24
 
 ### Added — agency aggregation tools
