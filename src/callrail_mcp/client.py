@@ -110,14 +110,35 @@ def _safe_path(path: str) -> str:
 
 
 def _load_api_key() -> str:
-    """Load API key from env var or ~/.config/callrail/api-key.txt."""
+    """Load API key from env var or ~/.config/callrail/api-key.txt.
+
+    Supports both `~` (user home) and `$VAR` expansion in
+    CALLRAIL_API_KEY_FILE. Warns if the file is group/world-readable
+    (mode 600 strongly recommended for credential files).
+    """
     key = os.environ.get("CALLRAIL_API_KEY", "").strip()
     if key:
         return key
-    key_path = Path(os.environ.get("CALLRAIL_API_KEY_FILE", "")).expanduser() if os.environ.get("CALLRAIL_API_KEY_FILE") else (
-        Path.home() / ".config" / "callrail" / "api-key.txt"
-    )
+    raw_path = os.environ.get("CALLRAIL_API_KEY_FILE")
+    if raw_path:
+        # Expand both env vars and ~ — without expandvars, paths like
+        # "$HOME/keys/file" resolve to the literal string and fail.
+        key_path = Path(os.path.expandvars(raw_path)).expanduser()
+    else:
+        key_path = Path.home() / ".config" / "callrail" / "api-key.txt"
     if key_path.exists():
+        # Warn (don't error) on lax permissions — the API key is a secret
+        # and credential files should be mode 600 (owner-read-only).
+        try:
+            mode = key_path.stat().st_mode
+            if mode & 0o077:
+                logger.warning(
+                    "CallRail API key file %s has lax permissions (mode %o); "
+                    "recommended: chmod 600 %s",
+                    key_path, mode & 0o777, key_path,
+                )
+        except OSError:
+            pass  # Permission check is best-effort.
         return key_path.read_text().strip()
     raise CallRailError(
         "No CallRail API key found. Set CALLRAIL_API_KEY env var or place the "
@@ -163,7 +184,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.4.2 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.4.3 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -352,7 +373,12 @@ class CallRailClient:
         accounts = data.get("accounts") or data.get("agencies") or []
         if not accounts:
             raise CallRailError("No CallRail accounts accessible with this API key")
-        return accounts[0]["id"]
+        first_id = accounts[0].get("id")
+        if not isinstance(first_id, str):
+            raise CallRailError(
+                f"Unexpected account.id type from CallRail: {type(first_id).__name__}"
+            )
+        return first_id
 
     def paginate(
         self,

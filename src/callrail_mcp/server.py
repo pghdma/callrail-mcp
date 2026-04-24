@@ -117,6 +117,12 @@ def _validate_window(
             list_calls semantics where a single page of all-time data is
             an acceptable fallback.
     """
+    # Coerce string-typed days from MCP clients that send loose JSON.
+    if days is not None and not isinstance(days, int):
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            return False, f"days={days!r} is not a valid integer."
     if days is not None and days < 0:
         return False, f"days={days} is negative."
     ok, msg = _validate_date(start_date or "", "start_date")
@@ -147,8 +153,15 @@ def _ok(data: Any) -> str:
 
 
 def _err(e: CallRailError) -> str:
+    # Truncate the body to ~500 chars to prevent CallRail responses from
+    # leaking large amounts of echoed data (PII, request payloads) into
+    # MCP responses / logs. The full body is already capped at 2000 in
+    # client.py; this is a second-line defense for MCP consumers.
+    body: str | None = e.body
+    if isinstance(body, str) and len(body) > 500:
+        body = body[:500] + f"... [truncated, {len(e.body) - 500} more chars]"  # type: ignore[arg-type]
     return json.dumps(
-        {"error": True, "status": e.status, "message": str(e), "body": e.body},
+        {"error": True, "status": e.status, "message": str(e), "body": body},
         indent=2,
     )
 
@@ -939,12 +952,26 @@ def search_calls_by_number(
         if company_id:
             params["company_id"] = company_id
 
+        # Cap matches at 500 to prevent MCP-frame-exceeding payloads on
+        # popular numbers (a 365-day window on a hot hotline could hit
+        # thousands of matches × ~500 bytes each = MBs of JSON).
+        SEARCH_MATCH_CAP = 500
         matches: list[dict[str, Any]] = []
+        truncated = False
         for c in client.paginate(f"a/{aid}/calls.json", params, items_key="calls", max_pages=50):
             num = _digits_only(c.get("customer_phone_number") or "")
             if num.endswith(digits):
+                if len(matches) >= SEARCH_MATCH_CAP:
+                    truncated = True
+                    break
                 matches.append(c)
-        return _ok({"query": phone_number, "match_count": len(matches), "calls": matches})
+        return _ok({
+            "query": phone_number,
+            "match_count": len(matches),
+            "truncated": truncated,
+            "match_cap": SEARCH_MATCH_CAP if truncated else None,
+            "calls": matches,
+        })
     except CallRailError as e:
         return _err(e)
 
@@ -1271,11 +1298,19 @@ PRICING_PER_TEXT = 0.05  # estimated; CallRail doesn't enumerate this
 
 
 def _is_toll_free(number: str | None) -> bool:
-    """True for North American toll-free prefixes."""
+    """True for North American toll-free prefixes (NANP only).
+
+    Returns False for non-NANP numbers (international, shortcodes, etc.)
+    rather than mis-classifying them as local — the cost model in
+    `usage_summary` doesn't price non-NANP numbers correctly anyway.
+    """
     if not number:
         return False
     digits = "".join(c for c in number if c.isdigit())
-    if len(digits) >= 4 and digits[0] == "1":
+    # NANP is exactly 11 digits with a leading "1". Shortcodes (5-6 digits)
+    # and international numbers (varied length) won't match this and will
+    # return False — they're better handled separately upstream.
+    if len(digits) == 11 and digits[0] == "1":
         return digits[1:4] in {"800", "888", "877", "866", "855", "844", "833"}
     return False
 
@@ -1451,7 +1486,32 @@ def usage_summary(
             else:
                 resource_share = 0.0
             cost += resource_share * PRICING_BASE_MONTHLY
-            company_row["estimated_cost_share"] = round(cost, 2)
+            # Store unrounded for largest-remainder reconciliation pass below.
+            company_row["_cost_unrounded"] = cost
+        # Largest-remainder rounding: round each share to cents, then
+        # distribute the rounding residual (typically ±$0.01–0.05) to the
+        # row with the largest fractional remainder. Ensures
+        # sum(per-company costs) == agency_total exactly, matching what
+        # a CallRail invoice would show.
+        if per_company:
+            target_cents = round(agency_total * 100)
+            rounded_cents = [round(r["_cost_unrounded"] * 100) for r in per_company]
+            residual = target_cents - sum(rounded_cents)
+            if residual:
+                # Sort by largest fractional remainder; adjust one cent at
+                # a time until residual is zero. Positive residual = bump
+                # up; negative = bump down.
+                remainders = sorted(
+                    range(len(per_company)),
+                    key=lambda i: abs(per_company[i]["_cost_unrounded"] * 100 - rounded_cents[i]),
+                    reverse=True,
+                )
+                step = 1 if residual > 0 else -1
+                for idx in remainders[: abs(residual)]:
+                    rounded_cents[idx] += step
+            for r, cents in zip(per_company, rounded_cents, strict=True):
+                r["estimated_cost_share"] = round(cents / 100.0, 2)
+                del r["_cost_unrounded"]
         per_company.sort(key=lambda r: r.get("estimated_cost_share", 0), reverse=True)
 
         return _ok({
