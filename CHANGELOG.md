@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-24
+
+### Fixed
+- **`search_calls_by_number`**: empty / non-digit / very-short input no longer
+  returns the entire call history. Now requires ≥7 digits after stripping
+  non-digits and returns a clear error envelope explaining why if not.
+- **API key whitespace**: trailing newlines / leading spaces (a frequent
+  copy-paste mistake) are now stripped in `CallRailClient.__init__`. Previously
+  `requests` raised a cryptic *"Invalid leading whitespace in header value"*.
+- **Module import no longer requires an API key.** The singleton `CallRailClient`
+  is now lazy-built on first use via `get_client()`. `import callrail_mcp.server`
+  works in clean environments — useful for test discovery, schema introspection,
+  and `--help` flows.
+- **`per_page` clamping** (`list_calls`, `list_form_submissions`, `list_text_messages`):
+  values `≤ 0` now clamp to `1` instead of being passed through to the API.
+- **`days=0`** no longer silently degrades to "no date filter" (returning the
+  whole account history). Now ignored if non-positive.
+- **`days=-N`** rejected with a clear error.
+- **Date validation**: `start_date` / `end_date` validated against `YYYY-MM-DD`
+  format before hitting the API. Malformed inputs return a client-side error
+  instead of being silently dropped.
+- **`end_date < start_date`** now rejected with a clear error (CallRail would
+  otherwise return an unrelated, confusing result set).
+- **`add_call_tags` / `remove_call_tags`**: empty/whitespace tag entries in the
+  input list are silently filtered out via `_clean_tag_list()`. Avoids the API
+  400 from `add_call_tags(['', 'lead'])` and the side-effect of partially
+  applying changes.
+
+### Changed
+- `server.client` is now a transparent proxy over `get_client()` for
+  backward compatibility — existing call sites work unchanged.
+- Bumped User-Agent to `callrail-mcp/0.2.2`.
+
+### Added
+- 8 new unit tests covering: API-key whitespace stripping, lazy client init,
+  `per_page` clamping, date-window validation (malformed, swapped, negative),
+  `_clean_tag_list` behavior, and `search_calls_by_number` minimum-digit guard.
+
 ## [0.2.1] - 2026-04-24
 
 ### Fixed

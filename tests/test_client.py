@@ -212,3 +212,28 @@ def test_valid_tag_colors_excludes_common_invalid_values() -> None:
     """Plain color names without numbers are NOT valid in CallRail's API."""
     for invalid in ("red", "blue", "green", "gray", "black", "white", "#FF0000", "brown1"):
         assert invalid not in VALID_TAG_COLORS
+
+
+# ---- API-key whitespace stripping (v0.2.2) ----
+
+def test_api_key_whitespace_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trailing newlines / leading spaces are common copy-paste mistakes;
+    they must be stripped before going into the Authorization header."""
+    monkeypatch.delenv("CALLRAIL_API_KEY", raising=False)
+    c = CallRailClient(api_key="  abc123\n")
+    assert c.api_key == "abc123"
+    assert "abc123" in c.session.headers["Authorization"]
+    # No leading/trailing whitespace in the header value.
+    assert c.session.headers["Authorization"] == c.session.headers["Authorization"].strip()
+
+
+def test_api_key_strips_embedded_newlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALLRAIL_API_KEY", raising=False)
+    c = CallRailClient(api_key="abc\n123")
+    assert c.api_key == "abc123"
+
+
+def test_api_key_empty_after_stripping_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CALLRAIL_API_KEY", raising=False)
+    with pytest.raises(CallRailError, match="empty after stripping"):
+        CallRailClient(api_key="   \n  ")
