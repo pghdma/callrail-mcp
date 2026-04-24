@@ -967,6 +967,141 @@ def test_call_eligibility_check_no_gclid_rejected(server_with_mock_client) -> No
     assert "gclid" in reasons_str.lower()
 
 
+def test_usage_summary_rejects_zero_days_without_dates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.1 fix: days<=0 with no dates would aggregate all-time history,
+    blowing up the cost estimate."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.usage_summary(days=0))
+    assert out["error"] is True
+    assert "days" in out["message"] or "start_date" in out["message"]
+
+
+@responses.activate
+def test_usage_summary_paginates_calls(server_with_mock_client) -> None:
+    """v0.4.1 CRITICAL fix: previously truncated at 250 calls per company,
+    silently undercounting heavy clients (Malick at ~800 minutes hit this
+    in production)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [{"id": "COM_BIG", "name": "Big Client", "status": "active"}]},
+        status=200,
+    )
+    # Trackers: single page, 1 number.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [{"tracking_numbers": ["+14125551001"]}], "total_pages": 1},
+        status=200,
+    )
+    # Calls: page 1 with 250 calls (each 60s = 1 min) + total_pages=2.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60} for _ in range(250)], "page": 1, "total_pages": 2},
+        status=200,
+    )
+    # Page 2 with 50 more calls.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60} for _ in range(50)], "page": 2, "total_pages": 2},
+        status=200,
+    )
+    out = json.loads(server_mod.usage_summary(days=30))
+    # 300 calls × 1 min = 300 minutes. Pre-fix this would have been 250.
+    assert out["agency"]["minutes_used"] == 300.0
+    assert out["by_company"][0]["calls_in_window"] == 300
+
+
+@responses.activate
+def test_usage_summary_partial_failure_per_company(server_with_mock_client) -> None:
+    """v0.4.1 fix: one company's API failure shouldn't poison the whole report."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_OK", "name": "Working", "status": "active"},
+            {"id": "COM_FAIL", "name": "Broken", "status": "active"},
+        ]},
+        status=200,
+    )
+    # Working company: trackers + calls succeed.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [{"tracking_numbers": ["+14125551001"]}], "total_pages": 1},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60}], "total_pages": 1},
+        status=200,
+    )
+    # Broken company: trackers fail with 503.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"error": "service unavailable"},
+        status=503,
+    )
+    out = json.loads(server_mod.usage_summary(days=30))
+    # Working company in by_company; broken in partial_failures.
+    assert len(out["by_company"]) == 1
+    assert out["by_company"][0]["name"] == "Working"
+    assert len(out["partial_failures"]) == 1
+    assert out["partial_failures"][0]["company_name"] == "Broken"
+
+
+@responses.activate
+def test_call_eligibility_check_safe_duration_coercion(server_with_mock_client) -> None:
+    """v0.4.1 fix: duration arrives as float-string instead of int."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL_FLOAT.json",
+        json={
+            "duration": "75.5",  # float string
+            "answered": "true",  # string boolean
+            "gclid": "x",
+            "source_name": "google",
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL_FLOAT"))
+    assert out["call_facts"]["duration_seconds"] == 75
+    assert out["call_facts"]["answered"] is True
+    assert out["checks"]["duration_meets_threshold"] is True
+
+
+def test_call_eligibility_check_requires_CAL_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.1 fix: validate CAL prefix to fail fast on bogus IDs."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.call_eligibility_check(call_id="TRK_wrong_prefix"))
+    assert out["error"] is True
+    assert "CAL" in out["message"]
+
+
 @responses.activate
 def test_call_eligibility_check_custom_threshold(server_with_mock_client) -> None:
     """A 30s call passes if user lowered Google's threshold to 15s."""
