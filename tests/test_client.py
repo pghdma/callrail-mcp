@@ -1,10 +1,19 @@
 """Unit tests for the CallRail HTTP client."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
+import requests
 import responses
 
-from callrail_mcp.client import VALID_TAG_COLORS, CallRailClient, CallRailError
+from callrail_mcp.client import (
+    MAX_RETRY_DELAY_SECONDS,
+    VALID_TAG_COLORS,
+    CallRailClient,
+    CallRailError,
+    _safe_path,
+)
 
 
 @pytest.fixture
@@ -237,3 +246,189 @@ def test_api_key_empty_after_stripping_raises(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("CALLRAIL_API_KEY", raising=False)
     with pytest.raises(CallRailError, match="empty after stripping"):
         CallRailClient(api_key="   \n  ")
+
+
+# ---- v0.2.3: path traversal / URL-encoding ----
+
+def test_safe_path_passes_clean_input() -> None:
+    assert _safe_path("a/ACC1/calls/CAL_normal.json") == "a/ACC1/calls/CAL_normal.json"
+
+
+def test_safe_path_blocks_dotdot_traversal() -> None:
+    """`..` segments would let urljoin escape the base path. Must be rejected."""
+    with pytest.raises(CallRailError, match="not allowed"):
+        _safe_path("a/ACC1/calls/../../../etc/passwd.json")
+
+
+def test_safe_path_blocks_dot_segment() -> None:
+    with pytest.raises(CallRailError, match="not allowed"):
+        _safe_path("a/./b")
+
+
+def test_safe_path_blocks_empty_segment() -> None:
+    """Double-slash creates an empty segment that some parsers treat oddly."""
+    with pytest.raises(CallRailError, match="not allowed"):
+        _safe_path("a//b")
+
+
+def test_safe_path_blocks_control_chars() -> None:
+    with pytest.raises(CallRailError, match="control character"):
+        _safe_path("a/ACC1/tags/foo\x00bar")
+    with pytest.raises(CallRailError, match="control character"):
+        _safe_path("a/ACC1/calls/CAL\nbad")
+
+
+def test_safe_path_encodes_special_chars() -> None:
+    out = _safe_path("a/ACC1/tags/tag with spaces & ?")
+    assert "%20" in out
+    assert "%26" in out
+    assert "%3F" in out
+
+
+def test_safe_path_handles_empty() -> None:
+    assert _safe_path("") == ""
+    assert _safe_path("/") == ""
+
+
+def test_get_with_traversal_id_raises_callrail_error(client: CallRailClient) -> None:
+    """End-to-end: a malicious call_id surfaces as CallRailError, never an HTTP request."""
+    with pytest.raises(CallRailError, match="not allowed"):
+        client.get("a/ACC1/calls/../../etc/passwd.json")
+
+
+# ---- v0.2.3: network error wrapping ----
+
+def test_connection_error_is_wrapped(client: CallRailClient) -> None:
+    """ConnectionError should be retried then surfaced as CallRailError, never bare."""
+    with (
+        patch.object(client.session, "request",
+                     side_effect=requests.exceptions.ConnectionError("DNS fail")),
+        pytest.raises(CallRailError, match="Network error"),
+    ):
+        client.get("a.json")
+
+
+def test_timeout_is_wrapped(client: CallRailClient) -> None:
+    with (
+        patch.object(client.session, "request",
+                     side_effect=requests.exceptions.Timeout("slow")),
+        pytest.raises(CallRailError, match="Network error"),
+    ):
+        client.get("a.json")
+
+
+def test_connection_error_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Transient ConnectionError on first attempt is retried."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test")
+    c = CallRailClient(max_retries=2)
+    monkeypatch.setattr("time.sleep", lambda _: None)  # make tests fast
+
+    real_response = requests.Response()
+    real_response.status_code = 200
+    real_response._content = b'{"ok": true}'
+
+    call_count = {"n": 0}
+    def flaky(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise requests.exceptions.ConnectionError("blip")
+        return real_response
+
+    with patch.object(c.session, "request", side_effect=flaky):
+        data = c.get("a.json")
+    assert data == {"ok": True}
+    assert call_count["n"] == 2  # retried once, succeeded second time
+
+
+# ---- v0.2.3: Retry-After parsing ----
+
+def test_parse_retry_after_seconds() -> None:
+    assert CallRailClient._parse_retry_after("5", 0) == 5.0
+    assert CallRailClient._parse_retry_after("30", 1) == 30.0
+
+
+def test_parse_retry_after_caps_at_max() -> None:
+    assert CallRailClient._parse_retry_after("999999", 0) == MAX_RETRY_DELAY_SECONDS
+
+
+def test_parse_retry_after_http_date_does_not_crash() -> None:
+    """RFC 7231 also allows HTTP-date format. Must not crash with ValueError."""
+    out = CallRailClient._parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT", 0)
+    # Either parsed to a positive number of seconds, or fell back to default.
+    assert isinstance(out, float)
+    assert 0 <= out <= MAX_RETRY_DELAY_SECONDS
+
+
+def test_parse_retry_after_garbage_falls_back() -> None:
+    out = CallRailClient._parse_retry_after("not-a-thing", 1)
+    assert isinstance(out, float)
+    assert out <= MAX_RETRY_DELAY_SECONDS
+
+
+def test_parse_retry_after_empty_uses_backoff() -> None:
+    assert CallRailClient._parse_retry_after("", 2) == 4.0
+    assert CallRailClient._parse_retry_after(None, 3) == 8.0
+
+
+# ---- v0.2.3: response validation ----
+
+@responses.activate
+def test_rejects_json_array_response(client: CallRailClient) -> None:
+    """If CallRail returned a JSON array we'd return it, then downstream
+    .get() calls would AttributeError. Now we reject upfront."""
+    responses.add(responses.GET, "https://api.callrail.com/v3/a.json",
+                  body=b'["a","b","c"]', status=200,
+                  headers={"content-type": "application/json"})
+    with pytest.raises(CallRailError, match="Expected JSON object"):
+        client.get("a.json")
+
+
+@responses.activate
+def test_rejects_redirect(client: CallRailClient) -> None:
+    """Following a 3xx could leak the Authorization header to attacker-controlled host."""
+    responses.add(responses.GET, "https://api.callrail.com/v3/a.json",
+                  status=302, headers={"Location": "https://evil.com/exfil"})
+    with pytest.raises(CallRailError, match="redirect"):
+        client.get("a.json")
+
+
+# ---- v0.2.3: context manager ----
+
+def test_client_close_releases_session(client: CallRailClient) -> None:
+    client.close()
+    # Calling close again should be safe.
+    client.close()
+
+
+def test_client_as_context_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test")
+    with CallRailClient() as c:
+        assert c.api_key == "test"
+    # After exit, .close() has run; subsequent close() must not raise.
+    c.close()
+
+
+# ---- v0.2.3: redirects disabled at session level ----
+
+def test_session_max_redirects_zero(client: CallRailClient) -> None:
+    assert client.session.max_redirects == 0
+
+
+# ---- v0.2.3: pagination clamps per_page ----
+
+@responses.activate
+def test_paginate_clamps_negative_per_page(client: CallRailClient) -> None:
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+                  json={"calls": [{"id": "a"}], "total_pages": 1}, status=200)
+    list(client.paginate("a/ACC1/calls.json", params={"per_page": -5}, items_key="calls"))
+    sent_pp = responses.calls[0].request.params["per_page"]
+    assert int(sent_pp) >= 1
+
+
+@responses.activate
+def test_paginate_clamps_huge_per_page(client: CallRailClient) -> None:
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+                  json={"calls": [{"id": "a"}], "total_pages": 1}, status=200)
+    list(client.paginate("a/ACC1/calls.json", params={"per_page": 99999}, items_key="calls"))
+    sent_pp = int(responses.calls[0].request.params["per_page"])
+    assert sent_pp <= 250
