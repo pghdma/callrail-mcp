@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-04-24
+
+### Fixed (live-verification findings — round 2 of v0.3.2)
+
+Post-0.3.2 live testing against real CallRail trackers across all 5 active
+agency client companies surfaced 3 additional issues. All fixed.
+
+- **`VALID_SOURCE_TYPES` was too strict.** Previous list of 5 types missed
+  `facebook_all` and `bing_all`, both of which are in production use
+  (observed on Malick Brothers' Facebook Ads + Bing Ads trackers). Anyone
+  trying to `create_tracker(source_type="facebook_all", ...)` would have
+  been rejected client-side despite being valid on CallRail's side. List
+  now includes 7 values; comment invites PRs to add more as discovered.
+- **Tracker IDs containing `/` slipped past validation.** e.g.
+  `tracker_id="TRK_xyz/companies/COM_admin"` was split into multiple
+  URL segments by `_safe_path`, each segment encoded, and forwarded to
+  CallRail (which 404'd, so not exploitable — but wasted an API call).
+  New `_validate_id_shape` rejects any ID containing a slash.
+- **Dots-only tracker IDs slipped past `_safe_path`.** e.g.
+  `tracker_id=".."` got concatenated with the `.json` extension to
+  produce `...json`, which passed the exact-match check for `"."` /
+  `".."`. Same no-exploit-but-wastes-API-call story. Now rejected
+  client-side.
+
+### Added
+
+- `_validate_id_shape(value, field_name, prefix=None)` helper — wired
+  into `get_tracker`, `update_tracker`, `delete_tracker`. Supports an
+  optional prefix check for future tightening.
+- 10 new tests covering the new validation (8 parametrized on
+  `_validate_id_shape` + 2 on the source-types list).
+
+Tests: 133 → 143. All green.
+
 ## [0.3.2] - 2026-04-24
 
 ### Fixed (tracker CRUD audit pass — bug-hunt round 5)

@@ -164,6 +164,37 @@ def _require_non_empty(value: str | None, field_name: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_id_shape(
+    value: str,
+    field_name: str,
+    prefix: str | None = None,
+) -> tuple[bool, str]:
+    """Validate a CallRail ID looks like a single URL-safe segment.
+
+    - Must not contain '/' (multi-segment paths would reach different
+      endpoints — CallRail 404s, but we shouldn't send the request).
+    - Must not be just dots (those slip past `_safe_path`'s exact-match
+      check when concatenated with a file extension like '.json').
+    - Optional: must start with the given prefix ('TRK', 'COM', etc.).
+    """
+    if "/" in value:
+        return False, (
+            f"{field_name}={value!r} may not contain '/'. "
+            f"IDs must be single URL path segments."
+        )
+    # Catch values that are only dots — they collide with .json suffix in
+    # URL construction and produce bogus paths (e.g. tracker_id='..' →
+    # 'trackers/...json', which isn't traversal but wastes an API call).
+    if set(value.strip()) <= {"."}:
+        return False, f"{field_name}={value!r} cannot consist only of dots."
+    if prefix and not value.startswith(prefix):
+        return False, (
+            f"{field_name}={value!r} must start with {prefix!r} "
+            f"(CallRail IDs are prefixed: TRK for trackers, COM for companies, etc.)."
+        )
+    return True, ""
+
+
 def _validate_phone(value: str, field_name: str) -> tuple[bool, str]:
     """Loose E.164-ish phone check. Avoids burning an API call on obvious garbage."""
     if not _PHONE_RE.match(value.strip()):
@@ -250,14 +281,20 @@ def list_companies(
 
 
 VALID_TRACKER_TYPES: tuple[str, ...] = ("source", "session")
-# Discovered empirically by exhaustive testing — CallRail's docs do not enumerate.
-# Any other source.type value returns 400 "Source Unknown tracking source type".
+# Discovered empirically by exhaustive testing + live production trackers
+# observed in the wild — CallRail's docs do not enumerate these. Any other
+# source.type value returns 400 "Source Unknown tracking source type".
+#
+# If you encounter a 400 when using a source type that's clearly valid in
+# the CallRail UI, add it here and open an issue/PR.
 VALID_SOURCE_TYPES: tuple[str, ...] = (
     "all",
     "direct",
     "offline",
     "google_my_business",
     "google_ad_extension",  # Google Ads call extensions
+    "facebook_all",          # Facebook/Meta ads (observed in production)
+    "bing_all",              # Bing/Microsoft Ads (observed in production)
 )
 
 
@@ -304,6 +341,9 @@ def get_tracker(tracker_id: str, account_id: str | None = None) -> str:
         account_id: Auto-resolves if omitted.
     """
     ok, msg = _require_non_empty(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(tracker_id, "tracker_id")
     if not ok:
         return _err_msg(msg)
     try:
@@ -504,6 +544,9 @@ def update_tracker(
     ok, msg = _require_non_empty(tracker_id, "tracker_id")
     if not ok:
         return _err_msg(msg)
+    ok, msg = _validate_id_shape(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
     # Reject explicit empty strings on optional fields. (Callers should pass
     # None to leave a field unchanged; "" is almost certainly a mistake.)
     for value, field in (
@@ -583,6 +626,9 @@ def delete_tracker(tracker_id: str, account_id: str | None = None) -> str:
     including `disabled_at` timestamp). Empty object if CallRail returned 204.
     """
     ok, msg = _require_non_empty(tracker_id, "tracker_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(tracker_id, "tracker_id")
     if not ok:
         return _err_msg(msg)
     try:
