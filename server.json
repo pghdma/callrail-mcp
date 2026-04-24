@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pghdma/callrail-mcp",
+  "description": "CallRail REST API v3 with 49 tools — calls, form submissions, transcripts, full CRUD on tags/trackers/companies/users/notifications, plus agency-specific aggregation tools (usage_summary, compare_periods, bulk_update_calls, spam_detector, call_eligibility_check).",
+  "repository": {
+    "url": "https://github.com/pghdma/callrail-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "callrail-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "CallRail API key. Get one at Settings > API Keys in your CallRail account (requires Account Admin). Alternatively set CALLRAIL_API_KEY_FILE to a file path containing the key.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "CALLRAIL_API_KEY"
+        }
+      ]
+    }
+  ]
+}
