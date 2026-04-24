@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-24
+
+### Added — 8 new tools (final API parity push)
+
+API surface coverage now ~85% (up from 75% in v0.6.x). The remaining
+~15% is either deliberately not exposed by CallRail (UI-only) or
+gated behind account permissions our standard API key doesn't have
+(see CLAUDE.md "API coverage limits").
+
+#### Tools shipped
+- **`get_tag(tag_id)`** — single tag detail. Completes tag CRUD.
+- **`list_integrations(company_id)`** — discover GMB / Google Ads /
+  Facebook / Slack / Webhook integrations attached to a company.
+  Account-level listing isn't supported (CallRail returns 400).
+- **`get_integration(integration_id)`** — single-record detail.
+- **`create_form_submission(company_id, referrer, referring_url,
+  landing_page_url, ...)`** — manually create a form submission for
+  backfilling offline leads (walk-ins, paper forms, etc.). All 3 of
+  referrer/referring_url/landing_page_url required by CallRail.
+- **`create_outbound_call(from_number, to_number, confirm_dialing=False)`**
+  — place an outbound call. **Mirrors `create_tracker`'s safety
+  pattern**: requires `confirm_dialing=True` because it actually places
+  a real phone call (legal implications + minute cost).
+- **`list_notifications`** / **`create_notification`** /
+  **`update_notification`** / **`delete_notification`** — full CRUD on
+  per-user alert rules (who gets pinged on which call/text/form event).
+
+### Discovered + documented (NOT shipped)
+
+Probed live and confirmed permission-gated:
+- **`POST /text-messages.json`** (send SMS) returns 403 on standard
+  CallRail accounts — needs A2P SMS registration / dedicated SMS API
+  permission. CallRail enforces TCPA-compliance keywords on outbound.
+- **`POST /integrations.json`** (create webhook integration) returns
+  403 — needs Integration-Admin permission.
+
+CallRail does NOT expose the following via API (UI-only):
+- Outbound Caller IDs verification flow
+- Numbers / porting / ownership moves
+- Call Flows (IVR builder)
+- Custom Fields CRUD (only readable as part of call/form responses)
+- Do Not Call list management
+
+CLAUDE.md now has an "API coverage limits" section documenting all
+of the above so future contributors don't waste time re-discovering.
+
+### Added — tests
+- 13 new tests (284 → 297 total).
+
+### Verified clean
+- `mypy --strict`, `ruff`, `pytest -W error`, `bandit`, `pyright` —
+  all 5 check tools clean.
+
 ## [0.6.1] - 2026-04-24
 
 ### Fixed (audit on v0.6.0 — 9 findings, 2 HIGH)

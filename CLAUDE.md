@@ -39,6 +39,33 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - **No `logging.basicConfig()` at import time.** Library hygiene — only `main()` (CLI entry) configures logging.
 - **Lazy client init.** `server.get_client()` is the accessor; `server.client` is a proxy for back-compat. Module import must not require a key.
 
+## API coverage limits — endpoints we deliberately did NOT ship
+
+Probed live against PGHDMA's account 2026-04-24 and found these
+endpoints exist but return **403 "You do not have permission"** for
+standard CallRail accounts. Re-attempt if account is upgraded:
+
+- **`POST /a/{aid}/text-messages.json`** (send SMS) — needs A2P SMS
+  registration / dedicated SMS API permission. CallRail enforces
+  TCPA-compliance keywords (STOP/CANCEL/UNSUBSCRIBE) on outbound.
+- **`POST /a/{aid}/integrations.json`** (create webhook integration) —
+  needs Integration-Admin permission. CallRail webhooks are managed
+  via the integrations endpoint with `type=Webhook`.
+
+Endpoints we built but the user should know are permission-sensitive:
+- `create_outbound_call` works on standard accounts but **places a
+  real phone call** — requires `confirm_dialing=True` safety guard.
+- `create_notification` works; `alert_type` enum is plan-specific
+  (we warn-not-reject unknown values).
+
+Endpoints CallRail does NOT expose via API (UI only on standard
+plans):
+- Outbound Caller IDs (verification flow)
+- Numbers / porting / ownership moves
+- Call Flows (IVR builder)
+- Custom Fields CRUD (only readable as part of call/form responses)
+- Do Not Call list management
+
 ## Known CallRail API quirks (don't re-learn these)
 
 - DELETE on companies & trackers is a **soft-delete**. Records still appear in list responses unless `status="active"` filter used.
@@ -63,7 +90,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.6.1
+## Current version: 0.7.0
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -87,9 +114,10 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.5.3` — Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
 - `0.5.4` — Round 5 cleanup (0 correctness bugs, 2 LOW style fixes — v0.5.x bug-hunt converged)
 - `0.6.0` — **API parity push: 12 new tools** (Companies CRUD, Users CRUD, get_form_submission, get_text_message, list_webhooks, get_webhook). API surface coverage 50% → 75%
-- `0.6.1` — Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through; plus length caps, list type-check, docstring updates)
+- `0.6.1` — Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through)
+- `0.7.0` — **Final API parity push: 8 more tools** (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API surface coverage 75% → ~85%. SMS-send + webhook-create deliberately not built (account permissions return 403).
 
-**Tests: 284 passing. Coverage: 84%. 41 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 297 passing. Coverage: 84%. 49 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 

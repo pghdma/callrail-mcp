@@ -189,7 +189,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.6.1 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.7.0 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
