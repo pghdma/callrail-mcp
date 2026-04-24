@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-24
+
+### Added
+- `CallRailClient` now supports `post()`, `put()`, and `delete()` (parallel to existing `get()` — same retry/backoff behavior, JSON body in/out, 204 handled).
+- New write tools:
+  - `update_call` — update note, tags, value, spam flag, customer name, lead status.
+  - `add_call_tags` / `remove_call_tags` — additive/subtractive tag changes (preserves existing tags).
+  - `update_form_submission` — same field surface as `update_call` for CallRail form-tracking entries.
+  - `list_tags`, `create_tag`, `update_tag`, `delete_tag` — full CRUD on the per-company tag taxonomy.
+- 5 new unit tests covering POST/PUT/DELETE happy paths, error envelopes, and 429 retry on POST.
+
 ## [0.1.0] - 2026-04-23
 
 ### Added

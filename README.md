@@ -80,6 +80,8 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
+**Read tools**
+
 | Tool | Purpose |
 |---|---|
 | `list_accounts` | List accessible CallRail accounts |
@@ -94,6 +96,16 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 | `get_call_recording` | Recording URL (if recording enabled) |
 | `get_call_transcript` | Conversation Intelligence transcript |
 | `search_calls_by_number` | Find calls by phone number across a window |
+| `list_tags` | List tags in account or filtered to one company |
+
+**Write tools** *(new in v0.2)*
+
+| Tool | Purpose |
+|---|---|
+| `update_call` | Update note, tags, value, spam flag, customer name, lead status |
+| `add_call_tags` / `remove_call_tags` | Additive/subtractive tag changes (preserves existing) |
+| `update_form_submission` | Same field surface as `update_call` for form entries |
+| `create_tag` / `update_tag` / `delete_tag` | Full CRUD on the per-company tag taxonomy |
 
 All tools accept `account_id` optionally — if omitted, the first accessible account is auto-resolved. Most accept `company_id` to filter to a single client.
 
