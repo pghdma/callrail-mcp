@@ -133,17 +133,67 @@ def _date_window(
 def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
     """Pick the account's IANA time_zone from a list of active company records.
 
-    CallRail returns `time_zone` on each company; in practice all companies
-    in an agency share the same TZ. We sample the first active company.
+    CallRail returns `time_zone` on each company. In practice all companies
+    in an agency share the same TZ, but multi-region agencies CAN have
+    mixed TZs — in that case we use the first active company's TZ and warn.
     Returns "UTC" on any miss so callers always get a usable string.
+
+    Also warns on legacy non-IANA TZ names (e.g. "EST", "PST") which
+    `zoneinfo.ZoneInfo` accepts but represents as fixed offsets — these
+    do NOT observe DST, so day boundaries drift by 1 hour for half the year.
 
     Reuses the already-fetched companies list — no extra API call.
     """
+    found_tzs = {
+        c.get("time_zone")
+        for c in active_companies
+        if isinstance(c.get("time_zone"), str) and c.get("time_zone")
+    }
+    if len(found_tzs) > 1:
+        logger.warning(
+            "Multiple time zones across active companies %s — using first; "
+            "consider passing tz explicitly to aggregation tools.",
+            sorted(tz for tz in found_tzs if isinstance(tz, str)),
+        )
     for c in active_companies:
         tz = c.get("time_zone")
         if isinstance(tz, str) and tz:
+            # Warn on legacy non-IANA labels (no DST handling).
+            if tz.upper() in {"EST", "CST", "MST", "PST", "EDT", "CDT", "MDT", "PDT", "AKST", "HST"}:
+                logger.warning(
+                    "CallRail returned legacy TZ %r — this is treated as a "
+                    "fixed offset (no DST). Map to canonical IANA "
+                    "(e.g. 'America/New_York') in CallRail UI for correctness.",
+                    tz,
+                )
             return tz
     return "UTC"
+
+
+def _tag_names_from(tags: Any) -> list[str]:
+    """Extract clean string tag names from CallRail's `tags` field.
+
+    CallRail returns tags as either:
+      - List of dicts: `[{"id": 1, "name": "lead"}, ...]`
+      - List of strings: `["lead", ...]` (rare, from PUTs)
+      - None / missing
+
+    This helper handles all three and filters out malformed entries
+    (tag dicts missing `name`, non-string values). Without it, we end
+    up with `[None, "real_tag"]` flowing into PUT bodies, which CallRail
+    400s.
+    """
+    if not tags:
+        return []
+    out: list[str] = []
+    for t in tags:
+        if isinstance(t, dict):
+            name = t.get("name")
+            if isinstance(name, str) and name:
+                out.append(name)
+        elif isinstance(t, str) and t:
+            out.append(t)
+    return out
 
 
 def _validate_window(
@@ -1220,8 +1270,8 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
         return _err_msg("tags is empty (or only contained empty/whitespace strings).")
     try:
         aid = client.resolve_account_id(account_id)
-        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
-        existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
+        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags")
+        existing_names = _tag_names_from(existing)
         merged = list(dict.fromkeys(existing_names + cleaned))
         return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": merged}))
     except CallRailError as e:
@@ -1246,8 +1296,8 @@ def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = Non
         return _err_msg("tags is empty (or only contained empty/whitespace strings).")
     try:
         aid = client.resolve_account_id(account_id)
-        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
-        existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
+        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags")
+        existing_names = _tag_names_from(existing)
         to_remove = set(cleaned)
         kept = [t for t in existing_names if t not in to_remove]
         return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": kept}))
@@ -2014,8 +2064,16 @@ def compare_periods(
         prev_end = cur_start - timedelta(days=1)
         prev_start = prev_end - timedelta(days=days)
 
-        def _aggregate(window_start: str, window_end: str) -> dict[str, Any]:
-            """Return {total_minutes, total_calls, by_company: {cid: {minutes, calls, name}}}."""
+        partial_failures: list[dict[str, Any]] = []
+
+        def _aggregate(
+            window_start: str, window_end: str, window_label: str,
+        ) -> dict[str, Any]:
+            """Return {total_minutes, total_calls, by_company: {cid: {minutes, calls, name}}}.
+
+            On per-company API failure: surface in `partial_failures`
+            (not silent — agency totals would be misleading otherwise).
+            """
             agg_by_company: dict[str, dict[str, Any]] = {}
             for c in active_companies:
                 cid = c.get("id")
@@ -2039,7 +2097,17 @@ def compare_periods(
                         with contextlib.suppress(TypeError, ValueError):
                             total_seconds += int(float(raw_duration))
                 except CallRailError as e:
-                    logger.warning("compare_periods: %s failed for company %s", e, cid)
+                    partial_failures.append({
+                        "company_id": cid,
+                        "company_name": c.get("name", "(unnamed)"),
+                        "window": window_label,
+                        "window_start": window_start,
+                        "window_end": window_end,
+                        "error": str(e),
+                        "status": e.status,
+                        "partial_calls_before_failure": call_count,
+                        "partial_minutes_before_failure": round(total_seconds / 60.0, 1),
+                    })
                 agg_by_company[cid] = {
                     "name": c.get("name", "(unnamed)"),
                     "minutes": round(total_seconds / 60.0, 1),
@@ -2051,8 +2119,8 @@ def compare_periods(
                 "by_company": agg_by_company,
             }
 
-        cur = _aggregate(cur_start.isoformat(), cur_end.isoformat())
-        prev = _aggregate(prev_start.isoformat(), prev_end.isoformat())
+        cur = _aggregate(cur_start.isoformat(), cur_end.isoformat(), "current")
+        prev = _aggregate(prev_start.isoformat(), prev_end.isoformat(), "previous")
 
         def _pct(now: float, then: float) -> float | None:
             if then == 0:
@@ -2097,7 +2165,20 @@ def compare_periods(
                 "calls_delta": cur["total_calls"] - prev["total_calls"],
             },
             "by_company": company_deltas,
-            "biggest_mover": company_deltas[0]["name"] if company_deltas else None,
+            "biggest_mover": (
+                {
+                    "name": company_deltas[0]["name"],
+                    "direction": (
+                        "up" if company_deltas[0]["minutes_delta"] > 0
+                        else "down" if company_deltas[0]["minutes_delta"] < 0
+                        else "flat"
+                    ),
+                    "minutes_delta": company_deltas[0]["minutes_delta"],
+                    "minutes_pct_change": company_deltas[0]["minutes_pct_change"],
+                }
+                if company_deltas else None
+            ),
+            "partial_failures": partial_failures,
         })
     except CallRailError as e:
         return _err(e)
@@ -2237,7 +2318,7 @@ def bulk_update_calls(
                         "duration": c.get("duration"),
                         "answered": c.get("answered"),
                         "customer_name": c.get("customer_name"),
-                        "current_tags": [t.get("name") if isinstance(t, dict) else t for t in (c.get("tags") or [])],
+                        "current_tags": _tag_names_from(c.get("tags")),
                     }
                     for c in matched
                 ],
@@ -2258,17 +2339,16 @@ def bulk_update_calls(
             if not cid:
                 continue
             try:
-                # Build merged tag list if we're adding tags.
+                # B5 fix: re-GET fresh tags per call instead of trusting
+                # the (potentially minutes-old) tags from the matched
+                # list. Without this, a concurrent caller's tag write
+                # between list-time and commit-time gets clobbered.
+                # Only do the extra GET if we're actually merging tags.
                 if set_tags_add is not None:
-                    existing_names_raw = [
-                        t.get("name") if isinstance(t, dict) else t
-                        for t in (c.get("tags") or [])
-                    ]
-                    # Drop any None / non-string entries that snuck in
-                    # via missing tag.name in CallRail responses.
-                    existing_names: list[str] = [
-                        n for n in existing_names_raw if isinstance(n, str)
-                    ]
+                    fresh = client.get(
+                        f"a/{aid}/calls/{cid}.json", {"fields": "tags"}
+                    ).get("tags")
+                    existing_names = _tag_names_from(fresh)
                     merged_tags: list[str] | None = list(
                         dict.fromkeys(existing_names + set_tags_add)
                     )
@@ -2288,6 +2368,15 @@ def bulk_update_calls(
                 updated += 1
             except CallRailError as e:
                 failures.append({"call_id": cid, "error": str(e), "status": e.status})
+            except Exception as e:
+                # B9 fix: catch ANY unexpected error per call so the loop
+                # doesn't abort mid-batch leaving the user with no audit
+                # trail of what was already committed.
+                failures.append({
+                    "call_id": cid,
+                    "error": f"unexpected: {type(e).__name__}: {e}",
+                    "status": None,
+                })
 
         return _ok({
             "dry_run": False,
@@ -2411,6 +2500,13 @@ def spam_detector(
 
         likely_spam = [s for s in scored if s["score"] >= 3]
         likely_spam.sort(key=lambda r: r["score"], reverse=True)
+        likely_spam_total = len(likely_spam)
+        # B8 fix: cap returned list at 500 to keep MCP frame size sane.
+        # The full count is preserved in `likely_spam_total` so callers
+        # know there's more if they want to narrow the window.
+        SPAM_RETURN_CAP = 500
+        likely_spam_truncated = likely_spam_total > SPAM_RETURN_CAP
+        likely_spam = likely_spam[:SPAM_RETURN_CAP]
 
         # Top frequent callers (suspicious if many calls from one number).
         frequent_callers_items: list[tuple[str, int]] = sorted(
@@ -2424,7 +2520,9 @@ def spam_detector(
 
         result: dict[str, Any] = {
             "scanned_calls": len(all_calls),
-            "likely_spam_count": len(likely_spam),
+            "likely_spam_count": likely_spam_total,
+            "likely_spam_returned": len(likely_spam),
+            "likely_spam_truncated": likely_spam_truncated,
             "likely_spam": likely_spam,
             "frequent_callers": frequent_callers,
             "auto_tag": auto_tag,
@@ -2442,20 +2540,25 @@ def spam_detector(
                     continue
                 try:
                     # Use add_call_tags-equivalent flow: GET existing,
-                    # merge, PUT.
+                    # merge, PUT. Fresh GET (not stale list cache).
                     existing = client.get(
                         f"a/{aid}/calls/{cid}.json", {"fields": "tags"}
-                    ).get("tags") or []
-                    existing_names = [
-                        t.get("name") if isinstance(t, dict) else t
-                        for t in existing
-                    ]
+                    ).get("tags")
+                    existing_names = _tag_names_from(existing)
                     if tag_name not in existing_names:
                         merged = list(dict.fromkeys(existing_names + [tag_name]))
                         client.put(f"a/{aid}/calls/{cid}.json", {"tags": merged})
                     tagged += 1
                 except CallRailError as e:
                     failures.append({"call_id": cid, "error": str(e), "status": e.status})
+                except Exception as e:
+                    # B9: don't let an unexpected error abort the loop
+                    # leaving the user without an audit trail.
+                    failures.append({
+                        "call_id": cid,
+                        "error": f"unexpected: {type(e).__name__}: {e}",
+                        "status": None,
+                    })
             result["tag_name_used"] = tag_name
             result["tagged_count"] = tagged
             result["tag_failures"] = failures
