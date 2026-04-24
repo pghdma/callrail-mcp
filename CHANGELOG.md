@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-24
+
+### Fixed (tracker CRUD audit pass — bug-hunt round 5)
+
+A targeted audit of the v0.3.0 tracker CRUD code surfaced 1 critical, 4 high,
+and 7 medium bugs. All fixed in this release. **No breaking changes** — every
+fix tightens validation or improves return-value fidelity.
+
+#### CRITICAL
+- **`update_tracker(greeting_text="x")` alone would break the tracker.** PUT
+  /trackers replaces the whole `call_flow` object — supplying greeting_text
+  without destination_number would silently zero out the destination number.
+  Now rejected with a clear error directing the caller to pass both fields
+  together (or call `get_tracker` first to read the current destination).
+
+#### HIGH
+- **`delete_tracker` was discarding CallRail's response body.** The disabled
+  record (with `disabled_at` timestamp, etc.) is now captured in
+  `{"deleted": True, "tracker_id": ..., "response": <body>}`. Empty object
+  on 204.
+- **No format validation on `tracker_id` / `company_id` / `destination_number`.**
+  `get_tracker(tracker_id="")`, `update_tracker(tracker_id="   ")`,
+  `create_tracker(company_id="")` etc. previously burned an account-resolve
+  API call before failing. All now fail-fast pre-network with clear errors.
+- **`update_tracker` ran no input validation before resolving the account.**
+  Now mirrors `create_tracker`: every input checked before any network I/O.
+
+#### MEDIUM
+- **`toll_free=True` + `area_code="412"` silently dropped the area_code.**
+  Now rejected with `"Cannot specify both… choose one."`.
+- **No format check on `area_code` / `pool_size` / `destination_number`.**
+  - `area_code` must match `^\d{3}$`.
+  - `pool_size` must be in `[1, 50]` — the upper cap is a safety guard
+    against accidental 5-figure provisioning bills.
+  - `destination_number` must look like an E.164-ish phone (`^\+?\d{10,15}$`).
+- **No length caps on `name` / `whisper_message` / `greeting_text`.**
+  - `name`: 255 char cap.
+  - `whisper_message` / `greeting_text`: 500 char cap (CallRail TTS limits).
+  Prevents 5-minute TTS greetings billing the user.
+- **`list_trackers(status="garbage")` was forwarded to the API.** Now
+  validated against `("active", "disabled", None)` before any network call.
+- **Dead `if sms_enabled is not None` branch removed.** The parameter type
+  was `bool = True`, never None — branch always evaluated True. Now
+  unconditionally sets `sms_enabled` in the request body.
+
+#### Validation order normalization
+- All validation now runs **before** `confirm_billing` check in
+  `create_tracker`, so users see real input errors first instead of
+  having to fix billing-confirm before learning about other problems.
+
+### Added — testing infrastructure
+
+- **67 new mock-based unit tests** for tracker CRUD covering every
+  validation gate, every flag conflict, every format check, every
+  length cap. Total: 60 → 127.
+- **6 new property-based fuzz tests** using Hypothesis (~500 random
+  inputs each). Invariant: tracker tools must NEVER raise an uncaught
+  exception, only return parseable JSON envelopes. Total: 127 → 133.
+- **`hypothesis>=6.100`** added to `[project.optional-dependencies].dev`.
+
+### Notes
+
+This release contains no live API behavior changes — every existing
+caller continues to work. Validation tightens may now reject some
+inputs that previously made it to CallRail (and got 400-ed by them
+instead). Net result: faster + clearer failures for bad inputs.
+
 ## [0.3.1] - 2026-04-24
 
 ### Added
