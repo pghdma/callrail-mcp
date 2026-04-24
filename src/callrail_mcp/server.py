@@ -101,9 +101,22 @@ def _date_window(days: int | None, start_date: str | None, end_date: str | None)
 
 
 def _validate_window(
-    days: int | None, start_date: str | None, end_date: str | None
+    days: int | None,
+    start_date: str | None,
+    end_date: str | None,
+    *,
+    require_window: bool = False,
 ) -> tuple[bool, str]:
-    """Cross-field validation for date windows used by listing tools."""
+    """Cross-field validation for date windows used by listing tools.
+
+    Args:
+        require_window: If True, reject `days=0` AND no start_date — without
+            this guard, _date_window returns {} and CallRail returns ALL-TIME
+            history, which silently blows up aggregating tools (cost
+            estimates, summaries). Default False to preserve existing
+            list_calls semantics where a single page of all-time data is
+            an acceptable fallback.
+    """
     if days is not None and days < 0:
         return False, f"days={days} is negative."
     ok, msg = _validate_date(start_date or "", "start_date")
@@ -114,6 +127,11 @@ def _validate_window(
         return False, msg
     if start_date and end_date and start_date > end_date:
         return False, f"end_date {end_date!r} is before start_date {start_date!r}."
+    if require_window and (days is None or days <= 0) and not start_date:
+        return False, (
+            "Either days>=1 or an explicit start_date is required "
+            "(otherwise we'd aggregate all-time history)."
+        )
     return True, ""
 
 
@@ -700,6 +718,12 @@ def get_call(call_id: str, account_id: str | None = None, fields: str | None = N
         account_id: Auto-resolves if omitted.
         fields: Comma-separated extra fields (see list_calls for common names).
     """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {}
@@ -723,8 +747,12 @@ def call_summary(
     Returns counts: total, answered/missed, first-time/repeat callers, total
     duration, and breakdowns by `source` and `source_name`. Useful for
     weekly/monthly rollups without pulling every call into context.
+
+    Note: requires `days>=1` or an explicit `start_date` — without a window
+    this would paginate the entire account history (potentially 50+ pages
+    of 250 calls each), which is rarely what callers want.
     """
-    ok, msg = _validate_window(days, start_date, end_date)
+    ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
     try:
@@ -841,6 +869,12 @@ def list_users(account_id: str | None = None) -> str:
 @mcp.tool()
 def get_call_recording(call_id: str, account_id: str | None = None) -> str:
     """Get the recording URL for a call (if recording is enabled on the company)."""
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/calls/{call_id}/recording.json"))
@@ -851,6 +885,12 @@ def get_call_recording(call_id: str, account_id: str | None = None) -> str:
 @mcp.tool()
 def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
     """Get the AI transcript for a call (requires CallRail Conversation Intelligence)."""
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/calls/{call_id}/transcription.json"))
@@ -883,7 +923,10 @@ def search_calls_by_number(
         )
     if len(digits) > 10:
         digits = digits[-10:]
-    ok, msg = _validate_window(days, None, None)
+    # require_window=True — without a window we'd paginate all-time
+    # call history just to filter for a phone match, which is hugely
+    # wasteful (the user almost certainly wants recent calls).
+    ok, msg = _validate_window(days, None, None, require_window=True)
     if not ok:
         return _err_msg(msg)
     try:
@@ -936,7 +979,24 @@ def update_call(
     a 500 server error when `value` is included in the PUT body to /calls
     (verified via live testing 2026-04-24). It IS supported on form
     submissions — see `update_form_submission`.
+
+    Empty-string fields (e.g. `note=""`) are rejected because CallRail
+    interprets them as "clear this field" — almost always a mistake.
+    To intentionally clear a field, set it to None and use a separate UI
+    operation, or contact CallRail support.
     """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
+    # Reject empty strings on free-text optional fields.
+    for value, field in ((note, "note"), (customer_name, "customer_name"), (lead_status, "lead_status")):
+        if value is not None:
+            ok, msg = _require_non_empty(value, field)
+            if not ok:
+                return _err_msg(msg)
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -979,6 +1039,12 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
     request like `add_call_tags(['', 'lead'])` won't 400 — only `'lead'`
     is sent. Returns an error if no valid tags remain after cleaning.
     """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
     cleaned = _clean_tag_list(tags)
     if not cleaned:
         return _err_msg("tags is empty (or only contained empty/whitespace strings).")
@@ -999,6 +1065,12 @@ def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = Non
     Idempotent — removing a tag that isn't attached succeeds silently.
     Empty/whitespace-only entries in the input list are ignored.
     """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
     cleaned = _clean_tag_list(tags)
     if not cleaned:
         return _err_msg("tags is empty (or only contained empty/whitespace strings).")
@@ -1029,7 +1101,21 @@ def update_form_submission(
         submission_id: CallRail form-submission id (prefix 'FOR...').
         account_id: Auto-resolves if omitted.
         note, tags, value, spam, lead_status: same semantics as `update_call`.
+
+    Empty-string fields (e.g. `note=""`) are rejected to prevent accidental
+    field-clearing — see `update_call` docstring.
     """
+    ok, msg = _require_non_empty(submission_id, "submission_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(submission_id, "submission_id")
+    if not ok:
+        return _err_msg(msg)
+    for value_, field in ((note, "note"), (lead_status, "lead_status")):
+        if value_ is not None:
+            ok, msg = _require_non_empty(value_, field)
+            if not ok:
+                return _err_msg(msg)
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -1060,7 +1146,10 @@ def list_tags(
     """List all tags in the account, or filtered to one company."""
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        params: dict[str, Any] = {
+            "per_page": _clamp_per_page(per_page),
+            "page": max(1, page),
+        }
         if company_id:
             params["company_id"] = company_id
         return _ok(client.get(f"a/{aid}/tags.json", params))
@@ -1116,6 +1205,16 @@ def update_tag(
         color: One of: 'red1', 'red2', 'orange1', 'yellow1', 'green1',
             'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
     """
+    ok, msg = _require_non_empty(tag_id, "tag_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(tag_id, "tag_id")
+    if not ok:
+        return _err_msg(msg)
+    if name is not None:
+        ok, msg = _require_non_empty(name, "name")
+        if not ok:
+            return _err_msg(msg)
     if color is not None and color not in VALID_TAG_COLORS:
         return _err_msg(
             f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
@@ -1137,6 +1236,12 @@ def update_tag(
 @mcp.tool()
 def delete_tag(tag_id: str, account_id: str | None = None) -> str:
     """Delete a tag. Removes it from any calls/form submissions it was on."""
+    ok, msg = _require_non_empty(tag_id, "tag_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(tag_id, "tag_id")
+    if not ok:
+        return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         client.delete(f"a/{aid}/tags/{tag_id}.json")
@@ -1206,19 +1311,12 @@ def usage_summary(
     estimated cost share, plus the agency total and bundle utilization.
     Sorted by cost-share descending so the biggest user is on top.
     """
-    ok, msg = _validate_window(days, start_date, end_date)
+    # require_window=True rejects days<=0 with no start_date; without it
+    # _date_window returns {} and we'd aggregate all-time call history,
+    # blowing up the minute total and over-estimating cost wildly.
+    ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
-    # Reject days<=0 unless the caller provided explicit dates. Without
-    # this guard, _date_window returns {} and CallRail would page through
-    # all-time call history, blowing up the minute total + over-estimating
-    # cost wildly.
-    if (days is None or days <= 0) and not start_date:
-        return _err_msg(
-            "usage_summary requires either days>=1 or an explicit start_date "
-            "(otherwise we'd aggregate all-time call history and the cost "
-            "estimate would be meaningless)."
-        )
     try:
         aid = client.resolve_account_id(account_id)
         # 1. Pull all companies (single page, capped at 250 — agencies

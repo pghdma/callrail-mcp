@@ -163,7 +163,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.4.1 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.4.2 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -187,15 +187,22 @@ class CallRailClient:
     # ---- low-level ----
 
     @staticmethod
+    def _clamp_delay(value: float) -> float:
+        """Clamp a sleep value to [0, MAX_RETRY_DELAY_SECONDS]. Negative
+        values from a bad Retry-After header would crash time.sleep()."""
+        return max(0.0, min(value, MAX_RETRY_DELAY_SECONDS))
+
+    @staticmethod
     def _parse_retry_after(value: str | None, attempt: int) -> float:
         """RFC 7231: Retry-After can be seconds-int OR HTTP-date. Fall back
         to exponential backoff if neither parses. Cap at MAX_RETRY_DELAY_SECONDS
-        so a misbehaving server can't pin us for hours."""
+        so a misbehaving server can't pin us for hours, and floor at 0 so a
+        hostile/buggy server can't crash time.sleep() with a negative value."""
         default = float(2 ** attempt)
         if not value:
-            return min(default, MAX_RETRY_DELAY_SECONDS)
+            return CallRailClient._clamp_delay(default)
         try:
-            return min(float(value), MAX_RETRY_DELAY_SECONDS)
+            return CallRailClient._clamp_delay(float(value))
         except (TypeError, ValueError):
             pass
         try:
@@ -204,19 +211,29 @@ class CallRailClient:
             target = parsedate_to_datetime(value)
             if target.tzinfo is None:
                 target = target.replace(tzinfo=timezone.utc)
-            secs = max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
-            return min(secs, MAX_RETRY_DELAY_SECONDS)
+            secs = (target - datetime.now(timezone.utc)).total_seconds()
+            return CallRailClient._clamp_delay(secs)
         except (TypeError, ValueError, IndexError):
-            return min(default, MAX_RETRY_DELAY_SECONDS)
+            return CallRailClient._clamp_delay(default)
+
+    # Methods we'll retry on 5xx. POST is excluded because it's not
+    # idempotent — retrying after the server received but failed to
+    # respond could create duplicate resources (e.g. duplicate trackers
+    # at $3/mo each). 429 is still retried for all methods because the
+    # server hasn't processed the request yet.
+    _IDEMPOTENT_METHODS: frozenset[str] = frozenset({"GET", "PUT", "DELETE", "HEAD", "OPTIONS"})
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Response:
-        """Do one HTTP request with retry/backoff on 429, 5xx, and transient
-        network errors. Path is URL-encoded segment-by-segment to resist
-        path traversal via untrusted IDs."""
+        """Do one HTTP request with retry/backoff on 429, transient network
+        errors, and 5xx (only for idempotent methods — POST is NOT retried
+        on 5xx to avoid double-writes). Path is URL-encoded segment-by-segment
+        to resist path traversal via untrusted IDs."""
         url = urljoin(self.base_url, _safe_path(path))
         kwargs.setdefault("timeout", self.timeout)
         # Defense in depth — the session already disables redirects.
         kwargs.setdefault("allow_redirects", False)
+        method_upper = method.upper()
+        is_idempotent = method_upper in self._IDEMPOTENT_METHODS
 
         last_exc: BaseException | None = None
         resp: Response | None = None
@@ -225,8 +242,11 @@ class CallRailClient:
                 resp = self.session.request(method, url, **kwargs)
             except RETRYABLE_NETWORK_ERRORS as e:
                 last_exc = e
-                if attempt < self.max_retries:
-                    delay = min(float(2 ** attempt), MAX_RETRY_DELAY_SECONDS)
+                # Network errors: only retry for idempotent methods. A
+                # connection-reset on a POST might mean the server already
+                # processed the create; retrying would duplicate.
+                if attempt < self.max_retries and is_idempotent:
+                    delay = self._clamp_delay(float(2 ** attempt))
                     logger.warning(
                         "CallRail %s for %s; retrying in %.1fs (attempt %d/%d)",
                         type(e).__name__, url, delay, attempt + 1, self.max_retries + 1,
@@ -243,14 +263,18 @@ class CallRailClient:
                     f"Request to CallRail failed: {type(e).__name__}: {e}"
                 ) from e
 
-            # CallRail responds 429 with Retry-After on rate limit (60 req/min/account)
+            # CallRail responds 429 with Retry-After on rate limit (60 req/min/account).
+            # Safe to retry any method — server didn't accept the request.
             if resp.status_code == 429 and attempt < self.max_retries:
                 delay = self._parse_retry_after(resp.headers.get("Retry-After"), attempt)
                 logger.warning("CallRail 429; sleeping %.1fs (attempt %d)", delay, attempt + 1)
                 time.sleep(delay)
                 continue
-            if 500 <= resp.status_code < 600 and attempt < self.max_retries:
-                delay = min(float(2 ** attempt), MAX_RETRY_DELAY_SECONDS)
+            # 5xx: only retry for idempotent methods. A 502 on POST might
+            # mean the server processed the request but the response was
+            # lost — retrying would create a duplicate.
+            if 500 <= resp.status_code < 600 and attempt < self.max_retries and is_idempotent:
+                delay = self._clamp_delay(float(2 ** attempt))
                 logger.warning("CallRail %d; retrying in %.1fs (attempt %d)", resp.status_code, delay, attempt + 1)
                 time.sleep(delay)
                 continue
@@ -368,13 +392,20 @@ class CallRailClient:
             if not key or not data.get(key):
                 break
             yield from data[key]
-            total_pages = data.get("total_pages", 1)
-            if page >= total_pages:
+            # Use total_pages when present and >0 to detect end-of-results.
+            # Some endpoints omit it or report 0 — in those cases fall back
+            # to "stop on empty page" (handled by the not data.get(key)
+            # check at the top of the next iteration). Previously we used
+            # `data.get("total_pages", 1)` which silently truncated to
+            # page 1 whenever total_pages was missing.
+            total_pages = data.get("total_pages")
+            if total_pages and page >= total_pages:
                 break
             page += 1
         else:
-            # Loop exited normally — i.e. we hit the max_pages cap before
-            # finishing. Warn the caller they may be missing data.
+            # `while/else`: this clause only runs if the loop exits via the
+            # condition becoming false (i.e. page > max_pages), NOT via
+            # break. So this fires precisely when we hit the cap.
             logger.warning(
                 "paginate(%s) hit max_pages cap of %d; remaining pages not fetched.",
                 path, max_pages,

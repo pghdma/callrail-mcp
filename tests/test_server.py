@@ -772,39 +772,37 @@ def test_usage_summary_aggregates_correctly(server_with_mock_client) -> None:
         status=200,
     )
     # Big Client trackers (4 numbers in a session pool + 1 GMB local)
+    # NOTE: total_pages=1 required after v0.4.2 paginate fix — without it
+    # the iterator keeps fetching until empty page or max_pages.
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/trackers.json",
         json={"trackers": [
             {"tracking_numbers": ["+14125551001", "+14125551002", "+14125551003", "+14125551004"]},
             {"tracking_numbers": ["+14125551005"]},
-        ]},
+        ], "total_pages": 1},
         status=200,
-
     )
     # Big Client calls (10 calls totaling 600 seconds = 10 minutes)
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/calls.json",
-        json={"calls": [{"duration": 60} for _ in range(10)]},
+        json={"calls": [{"duration": 60} for _ in range(10)], "total_pages": 1},
         status=200,
-
     )
     # Small Client trackers (1 toll-free)
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/trackers.json",
-        json={"trackers": [{"tracking_numbers": ["+18005556666"]}]},
+        json={"trackers": [{"tracking_numbers": ["+18005556666"]}], "total_pages": 1},
         status=200,
-
     )
     # Small Client calls (2 calls × 30s = 1 minute)
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/calls.json",
-        json={"calls": [{"duration": 30}, {"duration": 30}]},
+        json={"calls": [{"duration": 30}, {"duration": 30}], "total_pages": 1},
         status=200,
-
     )
     out = json.loads(server_mod.usage_summary(days=30))
     assert "agency" in out
@@ -1100,6 +1098,186 @@ def test_call_eligibility_check_requires_CAL_prefix(monkeypatch: pytest.MonkeyPa
     out = json.loads(server_mod.call_eligibility_check(call_id="TRK_wrong_prefix"))
     assert out["error"] is True
     assert "CAL" in out["message"]
+
+
+# ============================================================
+# v0.4.2 — ID validation across all tools (audit pass 6 findings)
+# ============================================================
+
+@pytest.mark.parametrize("tool_name,kwargs,id_field", [
+    ("get_call", {"call_id": ""}, "call_id"),
+    ("get_call", {"call_id": "TRK_wrong"}, "call_id"),
+    ("get_call_recording", {"call_id": ""}, "call_id"),
+    ("get_call_recording", {"call_id": "wrong/prefix"}, "call_id"),
+    ("get_call_transcript", {"call_id": ""}, "call_id"),
+    ("update_call", {"call_id": "", "note": "x"}, "call_id"),
+    ("update_call", {"call_id": "../admin", "note": "x"}, "call_id"),
+    ("add_call_tags", {"call_id": "", "tags": ["lead"]}, "call_id"),
+    ("remove_call_tags", {"call_id": "", "tags": ["lead"]}, "call_id"),
+    ("update_form_submission", {"submission_id": "", "note": "x"}, "submission_id"),
+    ("update_form_submission", {"submission_id": "../admin", "note": "x"}, "submission_id"),
+    ("update_tag", {"tag_id": "", "name": "x"}, "tag_id"),
+    ("update_tag", {"tag_id": "..", "name": "x"}, "tag_id"),
+    ("delete_tag", {"tag_id": ""}, "tag_id"),
+    ("delete_tag", {"tag_id": "tag/../admin"}, "tag_id"),
+])
+def test_v042_id_validation_across_tools(
+    tool_name: str,
+    kwargs: dict,
+    id_field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All tools that interpolate an ID into a URL path now fail-fast on
+    empty / dots / slashes / wrong-prefix instead of burning an API call."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    tool = getattr(server_mod, tool_name)
+    out = json.loads(tool(**kwargs))
+    assert out["error"] is True
+
+
+def test_v042_update_call_rejects_empty_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_call(call_id="CAL_x", note=""))
+    assert out["error"] is True
+    assert "note" in out["message"]
+
+
+def test_v042_update_call_rejects_empty_customer_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_call(call_id="CAL_x", customer_name="   "))
+    assert out["error"] is True
+
+
+def test_v042_call_summary_rejects_zero_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.2 fix: call_summary now requires a window."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.call_summary(days=0))
+    assert out["error"] is True
+    assert "days" in out["message"] or "start_date" in out["message"]
+
+
+def test_v042_search_calls_rejects_zero_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.2 fix: search_calls_by_number now requires a window."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.search_calls_by_number(phone_number="4125551234", days=0))
+    assert out["error"] is True
+
+
+# ============================================================
+# v0.4.2 — Client-level fixes (POST no-retry, negative retry-after, paginate)
+# ============================================================
+
+def test_v042_clamp_delay_floors_negative() -> None:
+    """v0.4.2 fix: time.sleep() crashes on negative values; clamp at 0."""
+    assert CallRailClient._clamp_delay(-30) == 0.0
+    assert CallRailClient._clamp_delay(-0.001) == 0.0
+    assert CallRailClient._clamp_delay(5.5) == 5.5
+    assert CallRailClient._clamp_delay(99999) == 60.0  # MAX_RETRY_DELAY_SECONDS
+
+
+def test_v042_parse_retry_after_floors_negative() -> None:
+    """v0.4.2 fix: server sends Retry-After: -30, was crashing time.sleep."""
+    # Negative seconds value clamps to 0 instead of being passed to time.sleep.
+    assert CallRailClient._parse_retry_after("-30", attempt=0) == 0.0
+
+
+@responses.activate
+def test_v042_post_does_NOT_retry_on_5xx(server_with_mock_client) -> None:
+    """v0.4.2 CRITICAL fix: POST retries could create duplicate trackers
+    ($3/mo each). Now POST fails fast on 5xx instead of retrying."""
+    # Single 502 — pre-fix this would have been retried 3x, potentially
+    # creating 3 trackers if CallRail processed each retry.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"error": "internal"},
+        status=502,
+    )
+    out = json.loads(
+        server_mod.create_tracker(
+            name="Test", company_id="COM1", destination_number="+14125551234",
+            confirm_billing=True, area_code="412",
+        )
+    )
+    assert out["error"] is True
+    assert out["status"] == 502
+    # Verify only ONE POST was sent (no retries).
+    post_calls = [c for c in responses.calls if c.request.method == "POST"]
+    assert len(post_calls) == 1
+
+
+@responses.activate
+def test_v042_get_still_retries_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.4.2 sanity: GET retries should still work (idempotent)."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=2)
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"error": "transient"},
+        status=503,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    # Should succeed after retry.
+    aid = server_mod.client.resolve_account_id()
+    assert aid == "ACC1"
+
+
+@responses.activate
+def test_v042_paginate_handles_missing_total_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.4.2 fix: previously hardcoded `total_pages` default to 1, silently
+    truncating to page 1 whenever the field was missing. Now falls back to
+    'stop on empty page'."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    # Page 1: 100 items, NO total_pages.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"id": f"CAL_{i}"} for i in range(100)]},
+        status=200,
+    )
+    # Page 2: 50 items, NO total_pages.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"id": f"CAL_{i}"} for i in range(100, 150)]},
+        status=200,
+    )
+    # Page 3: empty — terminator.
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": []},
+        status=200,
+    )
+    items = list(
+        server_mod.client.paginate(
+            "a/ACC1/calls.json", {"per_page": 100}, items_key="calls"
+        )
+    )
+    # Pre-fix: 100. Post-fix: 150 (all data preserved).
+    assert len(items) == 150
 
 
 @responses.activate

@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-24
+
+### Fixed (audit pass 6 — sweep of previously-untouched code)
+
+A focused audit pass on the older tools (call CRUD, tag CRUD, form
+CRUD, read tools) and the HTTP client layer surfaced 30+ findings.
+Highest-impact 12 fixed in this release.
+
+#### CRITICAL
+- **POST retries on 5xx could create duplicate trackers.** A 502 on
+  `create_tracker` would trigger up to 3 retries — if CallRail had
+  actually processed the original request and just lost the response,
+  the retries would produce 2-4 trackers ($3/mo each, charged forever).
+  Fix: 5xx-retry policy now restricted to **idempotent methods** (GET,
+  PUT, DELETE, HEAD, OPTIONS). POST returns the 5xx as an error
+  envelope on first failure. 429 still retries all methods (server
+  hasn't accepted the request yet).
+- **`paginate()` silently truncated to page 1** when `total_pages` was
+  missing from the response. Previously hardcoded a default of `1`,
+  causing immediate stop. Now falls back to "stop on empty page",
+  preserving all data.
+
+#### HIGH
+- **Missing ID validation on 9 tools**: `get_call`,
+  `get_call_recording`, `get_call_transcript`, `update_call`,
+  `add_call_tags`, `remove_call_tags`, `update_form_submission`,
+  `update_tag`, `delete_tag` all accepted empty / dots-only / slash-
+  containing IDs and forwarded them to CallRail (404). Now fail-fast
+  with `_require_non_empty` + `_validate_id_shape` (with appropriate
+  prefix where applicable).
+- **`update_call` / `update_form_submission` accepted empty-string
+  optional fields** (`note=""`, `customer_name="   "`), which
+  CallRail interprets as "clear this field" — almost always a mistake.
+  Now rejected with a clear error.
+
+#### MEDIUM
+- **`call_summary` / `search_calls_by_number` accepted `days=0` with
+  no `start_date`** → `_date_window` returned `{}` → CallRail returned
+  ALL-TIME call history → up to 12,500 calls aggregated. Same root
+  cause as the `usage_summary` bug from v0.4.1. Now `_validate_window`
+  has a `require_window=True` flag used by all three.
+- **`_parse_retry_after` accepted negative seconds.** A server sending
+  `Retry-After: -30` would have crashed `time.sleep()` with
+  `ValueError`. New `_clamp_delay()` helper floors at 0 and caps at
+  `MAX_RETRY_DELAY_SECONDS`.
+- **`list_tags` used `min(per_page, MAX_PER_PAGE)` instead of
+  `_clamp_per_page`** (didn't floor at 1) and didn't clamp `page≥1`.
+  Now consistent with sibling listing tools.
+
+### Added — tests
+
+- 24 new unit tests (159 → 183 total):
+  - 15-row parametrized matrix covering ID validation across every
+    fixed tool
+  - Empty-string field rejection on update_call
+  - `days=0` rejection on call_summary + search_calls_by_number
+  - `_clamp_delay` boundary tests
+  - `_parse_retry_after` with negative seconds
+  - **POST does NOT retry on 5xx** (CRITICAL fix verification)
+  - GET still retries on 5xx (sanity)
+  - `paginate()` continues past page 1 when `total_pages` is missing
+
+### Considered + deferred
+- Silent pagination truncation in `list_companies`, `list_users`,
+  `list_form_submissions`, `list_text_messages`, `list_tags`
+  (one-page only, no auto-paginate). Default behavior preserved to
+  avoid surprising callers with very large response payloads. Will
+  add an opt-in `all_pages=True` flag in a future release.
+- Length caps on `note`/`customer_name`/tag-name (CallRail's actual
+  limits aren't documented).
+- Enum validation for `lead_status` (could break for accounts using
+  custom lead-status values).
+- `resolve_account_id()` validation of caller-supplied IDs (would
+  add a HEAD request to every call — not worth the latency).
+
 ## [0.4.1] - 2026-04-24
 
 ### Fixed (3-round audit pass on v0.4.0 tools)
