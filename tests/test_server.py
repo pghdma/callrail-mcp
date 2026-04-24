@@ -37,6 +37,18 @@ def server_with_mock_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = CallRailClient(max_retries=0)
 
+
+@pytest.fixture(autouse=True)
+def _reset_module_warning_dedup_state() -> None:
+    """v0.5.3 (audit r4 F4): `_pick_account_tz` dedupes warnings via
+    module-level sets. Reset them before EACH test so warning-asserting
+    tests aren't polluted by earlier tests' fixtures (pytest doesn't
+    guarantee test order)."""
+    if hasattr(server_mod, "_warned_tzs"):
+        server_mod._warned_tzs.clear()
+    if hasattr(server_mod, "_warned_multi_tz_signature"):
+        server_mod._warned_multi_tz_signature.clear()
+
 # ---- helpers ----
 
 def test_clamp_per_page_floor_and_ceiling() -> None:
@@ -2283,6 +2295,17 @@ def test_v052_spam_detector_caps_days_at_90(monkeypatch: pytest.MonkeyPatch) -> 
     # because no mock; but `error` could be True with status=500 etc.).
     # The point is the message shouldn't say "exceeds spam_detector cap".
     assert "exceeds spam_detector cap" not in str(out)
+
+
+def test_v053_spam_detector_string_days_cap_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.5.3 MED fix (round 4 F1): pre-fix, spam_detector(days='365')
+    bypassed the 90-day cap because `isinstance(str, int)` is False.
+    Now coerces before the cap check."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.spam_detector(days="365"))  # type: ignore[arg-type]
+    assert out["error"] is True
+    assert "90" in out["message"]
 
 
 def test_v052_pick_account_tz_dedupes_warnings(caplog: pytest.LogCaptureFixture) -> None:

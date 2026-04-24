@@ -2453,7 +2453,9 @@ def spam_detector(
 
     Args:
         company_id: Restrict to one company (recommended).
-        days: Lookback window (1-90 typical).
+        days: Lookback window (1-90; 90 is hard-capped to avoid memory
+            blowup on high-volume clients — full call list is materialized
+            for scoring before truncating the response).
         auto_tag: If True, ADD `tag_name` to each likely-spam call after
             the scan. Default False (preview only). Note: we deliberately
             do NOT mark calls as spam=True automatically — CallRail
@@ -2479,10 +2481,22 @@ def spam_detector(
     # Hard cap on `days` for spam_detector: scoring + auto-tag materializes
     # the full call list in memory before truncating the response.
     # days=365 on a high-volume client could be ~100MB of dicts.
-    # 90 matches the docstring's "1-90 typical" guidance.
-    if isinstance(days, int) and days > 90:
+    # Coerce string `days` (`_validate_window` does this locally but
+    # doesn't return the coerced value) so we can't be bypassed by
+    # `days="365"` from a loose-JSON MCP client.
+    days_int: int | None
+    if isinstance(days, bool):
+        days_int = None  # already rejected by _validate_window
+    elif isinstance(days, int):
+        days_int = days
+    else:
+        try:
+            days_int = int(days) if days is not None else None
+        except (TypeError, ValueError):
+            days_int = None
+    if days_int is not None and days_int > 90:
         return _err_msg(
-            f"days={days} exceeds spam_detector cap of 90. Long windows "
+            f"days={days_int} exceeds spam_detector cap of 90. Long windows "
             f"can blow up memory on high-volume clients (full call list "
             f"is materialized for scoring). Run multiple narrower scans."
         )
@@ -2583,10 +2597,16 @@ def spam_detector(
                 return _err_msg(msg)
             tagged = 0
             failures: list[dict[str, Any]] = []
-            # Iterate the FULL filtered list (not the capped preview) so
-            # auto_tag actually covers everything matched, not just the
-            # first 500 the user can see in the response.
-            for s in all_likely_spam:
+            # Cap operations to prevent runaway tagging loops. 1000 spam
+            # calls × 2 round-trips each = 2000 API calls, ~3 minutes.
+            # Beyond that, MCP transport timeouts can kill the loop and
+            # the user loses the audit trail.
+            SPAM_AUTO_TAG_CAP = 1000
+            tag_target = all_likely_spam[:SPAM_AUTO_TAG_CAP]
+            tag_truncated_at_cap = len(all_likely_spam) > SPAM_AUTO_TAG_CAP
+            # Iterate the (now possibly cap-truncated) list so auto_tag
+            # actually covers what we can practically commit in one call.
+            for s in tag_target:
                 cid = s["call_id"]
                 if not cid:
                     continue
@@ -2613,7 +2633,10 @@ def spam_detector(
                     })
             result["tag_name_used"] = tag_name
             result["tagged_count"] = tagged
-            result["tag_attempted_count"] = likely_spam_total
+            result["tag_attempted_count"] = len(tag_target)
+            result["tag_truncated_at_cap"] = tag_truncated_at_cap
+            result["tag_cap"] = SPAM_AUTO_TAG_CAP if tag_truncated_at_cap else None
+            result["tag_total_eligible"] = likely_spam_total
             result["tag_failures"] = failures
 
         return _ok(result)
