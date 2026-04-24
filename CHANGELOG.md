@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-24
+
+### Added — tracker CRUD
+
+Provision, configure, and disable CallRail tracking phone numbers
+programmatically. Useful for new-client onboarding (replaces ~20 minutes
+of clicking through the CallRail UI per client) and for automated source
+attribution setup.
+
+- **`get_tracker(tracker_id)`** — full detail for one tracker.
+- **`create_tracker(name, company_id, destination_number, …)`** — provision
+  a new tracking number. Supports both `type='source'` (single number tied
+  to one traffic source) and `type='session'` (DNI pool that swaps numbers
+  per visitor). Local (via `area_code`) or toll-free (`toll_free=True`).
+  Configures whisper message, recording, greeting text, SMS in one call.
+- **`update_tracker(tracker_id, …)`** — change name, destination,
+  whisper, greeting, SMS toggle. Notes that CallRail silently ignores
+  status changes via PUT (use `delete_tracker` to disable).
+- **`delete_tracker(tracker_id)`** — soft-delete: tracker stops receiving
+  new calls, history retained, phone number released back to CallRail's
+  pool.
+
+### Discovered (and now exposed) constants
+
+- `VALID_TRACKER_TYPES = ('source', 'session')`
+- `VALID_SOURCE_TYPES = ('all', 'direct', 'offline', 'google_my_business',
+  'google_ad_extension')` — discovered by exhaustive testing; CallRail's
+  REST docs do not enumerate this. Anything else returns
+  400 *"Unknown tracking source type"*.
+
+### Notes
+
+The 5 valid `source_type` values may surprise users expecting
+`google_ads` / `bing_ads` / `facebook_ads` etc. Those traffic sources are
+typically tracked via `type='session'` DNI pools (which swap numbers per
+visitor based on the referring URL / utm params), not via single-number
+source trackers. `google_ad_extension` specifically maps to the SERP
+call-extension number on Google Ads.
+
 ## [0.2.4] - 2026-04-24
 
 ### Removed (BREAKING for `update_call`)
