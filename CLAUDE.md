@@ -63,7 +63,7 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 0.4.8
+## Current version: 0.5.0
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -80,9 +80,10 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.4.5` — paginate companies, defensive total_pages cap
 - `0.4.6` — partial-failure surfaces accumulated minutes (silent data loss fix), bool rejected as days, is_toll_free handles formatted numbers
 - `0.4.7` — string-`days` no longer crashes `_date_window`; docstrings updated for length caps + source-slug semantics
-- `0.4.8` — `days=10**18` no longer raises uncaught OverflowError from `timedelta` (now capped at 36500/100yr in `_validate_window`)
+- `0.4.8` — `days=10**18` no longer raises OverflowError from `timedelta` (capped at 36500/100yr)
+- `0.5.0` — **3 new agency workflow tools**: `compare_periods` (MoM deltas), `bulk_update_calls` (filter-based mass update w/ dry_run), `spam_detector` (heuristic spam tagging). Plus `_date_window` now timezone-aware (uses first active company's `time_zone`).
 
-**Tests: 230 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 243 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 
@@ -92,6 +93,6 @@ See `CHANGELOG.md` for full history. Highlights:
 4. Outbound call placement
 5. Do-not-call list management
 6. Toll-free minute pricing differentiation in `usage_summary`
-7. Account-timezone awareness in `_date_window` (currently UTC)
+7. `export_calls_to_csv` for client-deliverable reporting
 
 Not yet started.

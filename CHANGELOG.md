@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-24
+
+### Added — 3 new agency workflow tools
+
+- **`compare_periods(days=30)`** — Month-over-month (or any-window-over-
+  previous-equivalent-window) delta analysis. Returns per-company minute
+  and call deltas, percentage changes, and biggest mover. Built to catch
+  traffic trends before they become invoice surprises. Cap: 365 days.
+- **`bulk_update_calls(filter=..., set=..., dry_run=True)`** — Apply the
+  same update (tag, note, lead_status, spam flag) to every call matching
+  a filter in one tool call. Replaces dozens of sequential `update_call`
+  calls. **`dry_run=True` by default**: returns a preview of which calls
+  would be updated. Hard cap of 500 calls per invocation; silent
+  truncation is surfaced via `truncated_at_cap: true` flag.
+- **`spam_detector(days=30, auto_tag=False)`** — Heuristic spam scoring
+  (duration, answered, first-call, repeat-caller). Flags calls with
+  score ≥ 3. Optional `auto_tag=True` (requires `company_id` for safety)
+  adds `auto_detected_spam` tag to flagged calls. Deliberately does NOT
+  mark `spam=True` — CallRail hides spam-flagged calls from default
+  GETs, so tagging is reviewable; user can spam-flag manually after.
+
+### Changed — `_date_window` is now timezone-aware
+
+- `_date_window(tz="America/New_York")` uses the account's IANA timezone
+  for the "today" boundary instead of UTC. `usage_summary` and
+  `compare_periods` auto-pick the TZ from the first active company.
+- New `_pick_account_tz()` helper reuses already-fetched companies
+  instead of issuing a separate request.
+
+Previously, a user in ET asking for `days=1` at 5 PM ET (= 10 PM UTC)
+would get 1 UTC day — which could misalign with their actual business
+day at month boundaries. Now the windows match the account's wall
+clock.
+
+### Fixed (v0.5.0 own-audit pass)
+
+Running the audit-and-fix loop on v0.5.0's own code surfaced 8 issues:
+
+- **HIGH**: `bulk_update_calls` silent truncation at 500-cap now surfaced
+  via `truncated_at_cap: true` + human hint string.
+- **HIGH**: `bulk_update_calls` now validates `answered` is exactly
+  `"true"`/`"false"`/None. Previously `answered="no"` was forwarded to
+  CallRail, which silently ignored it and returned ALL calls, which
+  then got bulk-updated.
+- **MED**: `bulk_update_calls` now validates `set_lead_status` is non-empty.
+- **MED**: `compare_periods` window boundaries were overlapping by one
+  day (CallRail's start_date/end_date are inclusive on both ends).
+  Fixed: `prev_end = cur_start - 1 day`.
+- **MED**: `spam_detector(auto_tag=True)` now REQUIRES `company_id` to
+  prevent accidentally tagging spam across every company in the agency.
+- **LOW**: `compare_periods` now uses the shared `_validate_window`
+  helper for consistency with other windowed tools.
+- **LOW**: `spam_detector` now uses `_validate_window(require_window=True)`
+  for consistency (previously had duplicated ad-hoc days check).
+- **LOW**: Removed dead `_get_account_timezone` helper in favor of
+  `_pick_account_tz` which reuses already-fetched companies.
+
+### Added — tests
+
+- 13 new tests (230 → 243 total):
+  - `compare_periods`: happy path, invalid-days rejection, window
+    non-overlap regression.
+  - `bulk_update_calls`: filter required, set_* required, dry-run
+    doesn't PUT, commit succeeds, invalid `answered` rejected,
+    truncation surfaced.
+  - `spam_detector`: scoring logic, auto-tag flow, company_id required
+    for auto_tag.
+  - `_date_window`: tz parameter honored, bad tz falls back to UTC.
+
 ## [0.4.8] - 2026-04-24
 
 ### Fixed (audit pass 16)
