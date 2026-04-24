@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-04-24
+
+### Fixed (round 4 audit on v0.5.2 — 4 findings, converging)
+
+#### MEDIUM
+- **`spam_detector` 90-day cap was bypassable via string input.**
+  `spam_detector(days="365")` (loose JSON from MCP clients) hit
+  `isinstance("365", int)` → False → cap-check skipped → `_date_window`
+  re-coerced and a 365-day request reached CallRail. Now the cap-check
+  coerces explicitly first.
+- **`spam_detector(auto_tag=True)` had no operation cap.** A high-volume
+  client with 5000+ flagged calls would trigger 5000 sequential
+  GET+PUT pairs (~17 minutes), often killed by MCP transport timeouts
+  mid-loop. Now capped at 1000 operations with `tag_truncated_at_cap`,
+  `tag_cap`, `tag_total_eligible` fields surfacing the truncation.
+
+#### LOW
+- **`spam_detector` docstring** said "1-90 typical" but 91+ now
+  hard-errors. Updated to "1-90; 90 is hard-capped".
+- **Test isolation hardened** for the v0.5.2 TZ-warning dedup state.
+  Module-level `_warned_tzs` / `_warned_multi_tz_signature` sets are
+  now reset before each test via an `autouse` fixture, so
+  warning-asserting tests can't be flaked by earlier-run tests
+  pre-populating the dedup state.
+
+### Trend
+Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
+
+### Added — tests
+- 1 new test (250 → 251):
+  - `spam_detector(days="365")` now correctly rejected by the 90 cap
+
 ## [0.5.2] - 2026-04-24
 
 ### Fixed (round 3 audit on v0.5.1 — 8 findings)
