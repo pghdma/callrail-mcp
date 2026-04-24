@@ -47,25 +47,50 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - `Retry-After` can be seconds-int OR HTTP-date. `_parse_retry_after` handles both + caps at 60s.
 - CallRail can return JSON arrays where docs suggest objects — `_parse` rejects non-object responses with CallRailError.
 - Tag colors: only `red1 red2 orange1 yellow1 green1 blue1 purple1 pink1 gray1 gray2`. Anything else = 400.
-- Tracker source.type: only `all direct offline google_my_business google_ad_extension`. Anything else = 400. For Google/Bing/FB ads, use `type='session'` DNI pools instead of source trackers.
+- Tracker source.type: 7 known-valid values: `all direct offline google_my_business google_ad_extension facebook_all bing_all`. Anything else = 400. For multi-source DNI use `type='session'` pools.
 - Tag create/`add_call_tags` with unknown names **auto-creates tags at the company level** as a side effect.
 - `confirm_billing=True` is REQUIRED on `create_tracker` — defensive against AI exploration. Costs money (~$3/mo/number).
 
-## Current version: 0.3.1
+## Validation guards added across versions (don't re-discover these)
+
+- ID validation everywhere: `_require_non_empty` + `_validate_id_shape` + Unicode-category rejection (no RTL/ZWS/combining chars). Wired into get/update/delete tools for tracker/call/form/tag IDs. Optional `prefix=` arg enforces "TRK"/"COM"/"CAL". Tag IDs additionally must match `^[0-9]+$`.
+- `_validate_window` rejects: bool, non-integer floats, negative days, swapped start/end, malformed YYYY-MM-DD. Optional `require_window=True` rejects `days<=0` w/o explicit dates (used by aggregating tools to prevent all-time scans).
+- `_safe_path` rejects empty/dot/control segments + percent-encodes per segment. Tracker IDs with `/` rejected at the validator before reaching `_safe_path`.
+- POST does NOT retry on 5xx (avoids duplicate trackers). GET/PUT/DELETE retry as before. 429 retries all methods.
+- Pagination: `paginate()` clamps `total_pages` at `max_pages`, falls back to "stop on empty page" when total_pages missing.
+- Cost rounding in `usage_summary` uses largest-remainder so per-company shares sum exactly to agency_total.
+- Length caps: tracker name 255, whisper/greeting 500, note 4000, customer_name 200, tags-per-request 100.
+- `_err()` truncates body to 500 chars + decodes bytes defensively.
+- API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
+
+## Current version: 0.4.7
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
 - `0.2.0-0.2.4` — write tools (update_call, tag CRUD, form updates); 4 passes of bug fixing
-- `0.3.0` — tracker CRUD (`create_tracker`/`update_tracker`/`delete_tracker`/`get_tracker`) + billing-confirmation safeguard
-- `0.3.1` — `status` filter on `list_companies` and `list_trackers`
+- `0.3.0` — tracker CRUD + billing-confirmation safeguard
+- `0.3.1` — `status` filter on `list_companies` / `list_trackers`
+- `0.3.2` — tracker CRUD audit (12 bugs incl. CRITICAL: `update_tracker(greeting_text)` alone wiped destination)
+- `0.3.3` — facebook_all/bing_all source types added; tracker_id slash bypass
+- `0.4.0` — `usage_summary` + `call_eligibility_check` agency tools
+- `0.4.1` — usage_summary CRITICAL pagination bug (was truncating at 250 calls/company)
+- `0.4.2` — POST no-retry on 5xx, paginate total_pages handling, ID validation across older tools
+- `0.4.3` — meta-audit: largest-remainder cost rounding, _err truncation, etc.
+- `0.4.4` — Unicode-invisible char rejection, source-slug detection, extension stripping
+- `0.4.5` — paginate companies, defensive total_pages cap
+- `0.4.6` — partial-failure surfaces accumulated minutes (silent data loss fix), bool rejected as days, is_toll_free handles formatted numbers
+- `0.4.7` — string-`days` no longer crashes `_date_window` (validator coerced locally but didn't propagate); docstrings updated to reflect length caps + source-slug semantics
+
+**Tests: 229 passing. Coverage: 84%. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Candidate features (ranked by agency utility)
 
-1. `usage_summary` tool — per-client cost attribution (minutes × $0.05 + active-tracker count × $3)
-2. Webhook subscribe/unsubscribe
-3. Notifications config CRUD (who gets pinged on which call)
-4. Custom field CRUD
-5. Outbound call placement
-6. Do-not-call list management
+1. Webhook subscribe/unsubscribe
+2. Notifications config CRUD (who gets pinged on which call)
+3. Custom field CRUD
+4. Outbound call placement
+5. Do-not-call list management
+6. Toll-free minute pricing differentiation in `usage_summary`
+7. Account-timezone awareness in `_date_window` (currently UTC)
 
-Not yet started. Ranked by the 2026-04-24 conversation with Steve.
+Not yet started.

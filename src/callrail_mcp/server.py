@@ -86,7 +86,19 @@ def _date_window(days: int | None, start_date: str | None, end_date: str | None)
     - Explicit dates always win over `days`.
     - `days <= 0` is treated as "no window" only if the caller passes None or 0
       explicitly; the calling tool is responsible for validating positive values.
+
+    Defensively coerces string `days` (e.g. `"7"` from MCP clients sending
+    loose JSON) to int. `_validate_window` does the same coercion but only
+    returns a (ok, msg) tuple — without this, the original string would
+    flow into `days > 0` and raise TypeError.
     """
+    if isinstance(days, str):
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            days = None
+    elif isinstance(days, float):
+        days = int(days) if days.is_integer() else None
     out: dict[str, str] = {}
     if start_date:
         out["start_date"] = start_date
@@ -1068,6 +1080,11 @@ def update_call(
     interprets them as "clear this field" — almost always a mistake.
     To intentionally clear a field, set it to None and use a separate UI
     operation, or contact CallRail support.
+
+    Length caps (rejected pre-network):
+        - `note`: 4000 chars
+        - `customer_name`: 200 chars
+        - `tags`: 100 entries max
     """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
@@ -1213,6 +1230,10 @@ def update_form_submission(
 
     Empty-string fields (e.g. `note=""`) are rejected to prevent accidental
     field-clearing — see `update_call` docstring.
+
+    Length caps (rejected pre-network):
+        - `note`: 4000 chars
+        - `tags`: 100 entries max
     """
     ok, msg = _require_non_empty(submission_id, "submission_id")
     if not ok:
@@ -1450,9 +1471,20 @@ def usage_summary(
         start_date: 'YYYY-MM-DD'.
         end_date: 'YYYY-MM-DD' (defaults to today).
 
-    Returns: A breakdown of each company's minutes, active trackers,
-    estimated cost share, plus the agency total and bundle utilization.
-    Sorted by cost-share descending so the biggest user is on top.
+    Returns:
+        - `agency`: plan + totals + bundle utilization + cycle estimate
+        - `by_company[]`: each company's minutes, active numbers, cost share
+          (sorted by cost-share descending)
+        - `biggest_cost_driver`: name of top company
+        - `partial_failures[]`: per-company API errors. Each entry carries
+          `partial_calls_before_failure`, `partial_minutes_before_failure`,
+          `partial_local_numbers`, `partial_tollfree_numbers` so an under-
+          reporting agency_total is observable, not silent.
+        - `notes`: caveats about the cost model (toll-free minute pricing
+          not yet differentiated; SMS not included).
+
+    Cost shares sum exactly to `agency.estimated_cycle_total` via largest-
+    remainder rounding.
     """
     # require_window=True rejects days<=0 with no start_date; without it
     # _date_window returns {} and we'd aggregate all-time call history,
@@ -1715,8 +1747,11 @@ def call_eligibility_check(
       2. Was the call answered? (Most integrations skip unanswered.)
       3. Did duration meet Google Ads' minimum? (Default 60s; configurable
          per conversion action in Google Ads UI.)
-      4. Is the call from a Google source (vs Bing/GMB/organic) so a
-         Google Ads conversion would even apply?
+      4. Is the call from a Google source? Detection uses CallRail's
+         internal `source` slug (e.g. `google_paid`, `google_my_business`)
+         + presence of gclid — NOT the user-editable `source_name` display
+         string (which can mislead, e.g. "Bing Ads (Google legacy import)"
+         would substring-match as Google but is clearly Bing).
 
     Args:
         call_id: 'CAL...' id.
