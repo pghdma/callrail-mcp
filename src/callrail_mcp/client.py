@@ -85,7 +85,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/0.1.0 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/0.2.0 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -113,19 +113,40 @@ class CallRailClient:
 
         return resp  # last response even if it failed
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """GET `path` and return parsed JSON. Raises CallRailError on non-2xx."""
-        resp = self._request("GET", path, params=params or {})
+    def _parse(self, resp: Response, method: str, path: str) -> dict[str, Any]:
+        """Validate response status and parse JSON. Raises CallRailError on non-2xx."""
         if resp.status_code >= 400:
             raise CallRailError(
-                f"CallRail API returned {resp.status_code} for GET {path}",
+                f"CallRail API returned {resp.status_code} for {method} {path}",
                 status=resp.status_code,
                 body=resp.text[:2000],
             )
+        if resp.status_code == 204 or not resp.content:
+            return {}
         try:
             return resp.json()
         except ValueError as e:
-            raise CallRailError(f"Non-JSON response from {path}: {e}", body=resp.text[:500]) from e
+            raise CallRailError(f"Non-JSON response from {method} {path}: {e}", body=resp.text[:500]) from e
+
+    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """GET `path` and return parsed JSON. Raises CallRailError on non-2xx."""
+        resp = self._request("GET", path, params=params or {})
+        return self._parse(resp, "GET", path)
+
+    def post(self, path: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """POST `path` with JSON body. Returns parsed JSON."""
+        resp = self._request("POST", path, json=body or {}, params=params or {})
+        return self._parse(resp, "POST", path)
+
+    def put(self, path: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """PUT `path` with JSON body. Used for partial updates per CallRail's REST conventions."""
+        resp = self._request("PUT", path, json=body or {}, params=params or {})
+        return self._parse(resp, "PUT", path)
+
+    def delete(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """DELETE `path`. CallRail returns 204 on success."""
+        resp = self._request("DELETE", path, params=params or {})
+        return self._parse(resp, "DELETE", path)
 
     # ---- mid-level helpers ----
 

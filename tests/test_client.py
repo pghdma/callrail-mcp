@@ -144,3 +144,55 @@ def test_resolve_account_id_empty_raises(client: CallRailClient) -> None:
                   json={"accounts": []}, status=200)
     with pytest.raises(CallRailError, match="No CallRail accounts"):
         client.resolve_account_id()
+
+
+# ---- write methods (v0.2) ----
+
+@responses.activate
+def test_post_returns_parsed_json(client: CallRailClient) -> None:
+    responses.add(responses.POST, "https://api.callrail.com/v3/a/ACC1/tags.json",
+                  json={"id": "TAG1", "name": "spam"}, status=201)
+    data = client.post("a/ACC1/tags.json", {"name": "spam", "company_id": "COM1"})
+    assert data["id"] == "TAG1"
+    assert data["name"] == "spam"
+    # body sent
+    sent = responses.calls[0].request.body
+    assert b"spam" in sent
+    assert b"COM1" in sent
+
+
+@responses.activate
+def test_put_partial_update(client: CallRailClient) -> None:
+    responses.add(responses.PUT, "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+                  json={"id": "CAL1", "spam": True, "tags": ["junk"]}, status=200)
+    data = client.put("a/ACC1/calls/CAL1.json", {"spam": True, "tags": ["junk"]})
+    assert data["spam"] is True
+    assert data["tags"] == ["junk"]
+
+
+@responses.activate
+def test_delete_returns_empty_on_204(client: CallRailClient) -> None:
+    responses.add(responses.DELETE, "https://api.callrail.com/v3/a/ACC1/tags/TAG1.json",
+                  status=204)
+    data = client.delete("a/ACC1/tags/TAG1.json")
+    assert data == {}
+
+
+@responses.activate
+def test_put_error_raises(client: CallRailClient) -> None:
+    responses.add(responses.PUT, "https://api.callrail.com/v3/a/ACC1/calls/CAL_NOPE.json",
+                  json={"error": "not found"}, status=404)
+    with pytest.raises(CallRailError) as exc:
+        client.put("a/ACC1/calls/CAL_NOPE.json", {"spam": True})
+    assert exc.value.status == 404
+
+
+@responses.activate
+def test_post_retries_on_429(client: CallRailClient) -> None:
+    responses.add(responses.POST, "https://api.callrail.com/v3/a/ACC1/tags.json",
+                  status=429, headers={"Retry-After": "0"})
+    responses.add(responses.POST, "https://api.callrail.com/v3/a/ACC1/tags.json",
+                  json={"id": "TAG_OK"}, status=201)
+    data = client.post("a/ACC1/tags.json", {"name": "x"})
+    assert data["id"] == "TAG_OK"
+    assert len(responses.calls) == 2

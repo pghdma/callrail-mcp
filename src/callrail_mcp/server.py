@@ -370,6 +370,195 @@ def search_calls_by_number(
         return _err(e)
 
 
+# ---- Write tools (v0.2) ----
+
+@mcp.tool()
+def update_call(
+    call_id: str,
+    account_id: str | None = None,
+    note: str | None = None,
+    tags: list[str] | None = None,
+    value: float | None = None,
+    spam: bool | None = None,
+    customer_name: str | None = None,
+    lead_status: str | None = None,
+) -> str:
+    """Update an existing call: notes, tags, value, spam flag, customer name, lead status.
+
+    Args:
+        call_id: 'CAL...' id of the call to update.
+        account_id: Auto-resolves if omitted.
+        note: Replace the call's note text.
+        tags: REPLACE the call's tag list with this set of tag names.
+              (Use `add_call_tags`/`remove_call_tags` for additive changes.)
+        value: Set the call's monetary value.
+        spam: True to mark as spam, False to unmark.
+        customer_name: Override the auto-detected caller name.
+        lead_status: e.g. 'good_lead', 'not_a_lead', 'unknown'.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        body: dict[str, Any] = {}
+        if note is not None:
+            body["note"] = note
+        if tags is not None:
+            body["tags"] = tags
+        if value is not None:
+            body["value"] = value
+        if spam is not None:
+            body["spam"] = spam
+        if customer_name is not None:
+            body["customer_name"] = customer_name
+        if lead_status is not None:
+            body["lead_status"] = lead_status
+        if not body:
+            return _ok({"error": True, "message": "No fields supplied to update."})
+        return _ok(client.put(f"a/{aid}/calls/{call_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
+    """Append tags to a call without replacing existing ones."""
+    try:
+        aid = client.resolve_account_id(account_id)
+        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
+        existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
+        merged = list(dict.fromkeys(existing_names + tags))
+        return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": merged}))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
+    """Remove specific tags from a call (case-sensitive on tag name)."""
+    try:
+        aid = client.resolve_account_id(account_id)
+        existing = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": "tags"}).get("tags") or []
+        existing_names = [t.get("name", t) if isinstance(t, dict) else t for t in existing]
+        kept = [t for t in existing_names if t not in tags]
+        return _ok(client.put(f"a/{aid}/calls/{call_id}.json", {"tags": kept}))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_form_submission(
+    submission_id: str,
+    account_id: str | None = None,
+    note: str | None = None,
+    tags: list[str] | None = None,
+    value: float | None = None,
+    spam: bool | None = None,
+    lead_status: str | None = None,
+) -> str:
+    """Update an existing form submission: notes, tags, value, spam, lead status.
+
+    Args:
+        submission_id: CallRail form-submission id (prefix 'FOR...').
+        account_id: Auto-resolves if omitted.
+        note, tags, value, spam, lead_status: same semantics as `update_call`.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        body: dict[str, Any] = {}
+        if note is not None:
+            body["note"] = note
+        if tags is not None:
+            body["tags"] = tags
+        if value is not None:
+            body["value"] = value
+        if spam is not None:
+            body["spam"] = spam
+        if lead_status is not None:
+            body["lead_status"] = lead_status
+        if not body:
+            return _ok({"error": True, "message": "No fields supplied to update."})
+        return _ok(client.put(f"a/{aid}/form_submissions/{submission_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_tags(
+    account_id: str | None = None,
+    company_id: str | None = None,
+    per_page: int = 250,
+    page: int = 1,
+) -> str:
+    """List all tags in the account, or filtered to one company."""
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        if company_id:
+            params["company_id"] = company_id
+        return _ok(client.get(f"a/{aid}/tags.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def create_tag(
+    name: str,
+    company_id: str,
+    account_id: str | None = None,
+    color: str | None = None,
+) -> str:
+    """Create a new tag scoped to one company.
+
+    Args:
+        name: Tag display name.
+        company_id: Required — tags are per-company in CallRail.
+        account_id: Auto-resolves if omitted.
+        color: Optional CallRail color name
+            (e.g. 'gray1','red','orange','green','blue','purple','pink',
+            'brown','dark blue','dark green').
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        body: dict[str, Any] = {"name": name, "company_id": company_id}
+        if color:
+            body["color"] = color
+        return _ok(client.post(f"a/{aid}/tags.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_tag(
+    tag_id: str,
+    account_id: str | None = None,
+    name: str | None = None,
+    color: str | None = None,
+) -> str:
+    """Rename or recolor a tag."""
+    try:
+        aid = client.resolve_account_id(account_id)
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if color is not None:
+            body["color"] = color
+        if not body:
+            return _ok({"error": True, "message": "Supply name or color to update."})
+        return _ok(client.put(f"a/{aid}/tags/{tag_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def delete_tag(tag_id: str, account_id: str | None = None) -> str:
+    """Delete a tag. Removes it from any calls/form submissions it was on."""
+    try:
+        aid = client.resolve_account_id(account_id)
+        client.delete(f"a/{aid}/tags/{tag_id}.json")
+        return _ok({"deleted": True, "tag_id": tag_id})
+    except CallRailError as e:
+        return _err(e)
+
+
 def main() -> None:
     """CLI entry point for stdio transport."""
     mcp.run()
