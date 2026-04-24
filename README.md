@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.pghdma/callrail-mcp -->
+
 # callrail-mcp
 
 [![PyPI version](https://img.shields.io/pypi/v/callrail-mcp.svg)](https://pypi.org/project/callrail-mcp/)
