@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-04-24
+
+### Fixed (audit pass 12 — 5 bugs incl. 1 HIGH)
+
+#### HIGH — silent data loss on partial pagination failure
+- **`usage_summary` partial-failure path was dropping accumulated
+  call data**. If a company's call pagination succeeded for pages 1-2
+  (250 calls each = 500 calls = ~$25 of overage) but then failed on
+  page 3 with a 503, the agency total under-reported by those 500
+  calls' worth and the user had no way to know how much was lost.
+  Now `partial_failures[]` includes `partial_calls_before_failure`,
+  `partial_minutes_before_failure`, `partial_local_numbers`,
+  `partial_tollfree_numbers` for each company that errored mid-loop.
+
+#### LOW
+- **`_is_toll_free` was splitting on commas, breaking
+  `+1,800,555,1234`-style human-formatted toll-free numbers**.
+  Splitting at the first comma left `+1`, leading to misclassification.
+  Now extracts ASCII digits ignoring all separators.
+- **`_validate_window` accepted `bool` as `days`** because Python's
+  `isinstance(True, int)` is True. `days=True` silently became
+  `days=1`. Now rejected with a clear error.
+- **`_clean_tag_list` silently dropped non-string entries.** `add_call_tags(['hot', 42, 'lead'])` would silently drop the `42` and add only 2 tags. Now logs a warning identifying how many entries were dropped.
+- **`call_summary` swallowed malformed durations silently.** Now logs
+  a WARNING with the offending call ID + raw value (matches
+  `usage_summary` behavior added in v0.4.6 too).
+
+### Verified clean
+- `pytest -W error` passes (no Python warnings in test runs)
+- `mypy --strict` passes
+- ruff lint clean
+
+### Added — tests
+
+- 4 new unit tests (223 → 227 total):
+  - Partial-failure surfaces accumulated data
+  - Toll-free comma/dash/dot format detection
+  - Bool-as-days rejection
+  - `_clean_tag_list` warning on non-strings
+
 ## [0.4.5] - 2026-04-24
 
 ### Fixed (audit pass 11 — diminishing returns territory, but still 6 bugs)
