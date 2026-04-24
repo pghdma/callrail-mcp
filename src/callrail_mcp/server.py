@@ -1362,7 +1362,11 @@ PRICING_BUNDLED_TEXTS = 25
 PRICING_PER_LOCAL_NUMBER = 3.00
 PRICING_PER_TOLLFREE_NUMBER = 5.00
 PRICING_PER_LOCAL_MINUTE = 0.05
-PRICING_PER_TOLLFREE_MINUTE = 0.08
+# Note: toll-free minute pricing ($0.08/min) is real, but `usage_summary`
+# doesn't yet differentiate per-call (would require looking up which tracker
+# each call came from and whether that tracker has toll-free numbers).
+# Currently all minutes are priced at PRICING_PER_LOCAL_MINUTE. Negligible
+# error for accounts without toll-free numbers; documented in tool output.
 PRICING_PER_TEXT = 0.05  # estimated; CallRail doesn't enumerate this
 
 
@@ -1429,10 +1433,15 @@ def usage_summary(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        # 1. Pull all companies (single page, capped at 250 — agencies
-        # typically have <50 clients).
-        companies_resp = client.get(f"a/{aid}/companies.json", {"per_page": 250})
-        companies: list[dict[str, Any]] = companies_resp.get("companies", []) if isinstance(companies_resp, dict) else []
+        # 1. Pull all companies (paginated). Most agencies have well under
+        # 250 clients but MSPs can exceed it; previously truncated silently.
+        companies = list(
+            client.paginate(
+                f"a/{aid}/companies.json",
+                {"per_page": 250},
+                items_key="companies",
+            )
+        )
         active_companies = [c for c in companies if c.get("status") == "active"]
 
         # 2. Pull active trackers per company. Numbers/pool_size aggregate
@@ -1736,8 +1745,8 @@ def call_eligibility_check(
         # source_name substring match but is clearly Bing.
         is_google = (
             utm_source == "google"
+            or source_slug == "google"
             or source_slug.startswith("google_")
-            or source_slug == "google_my_business"
             or bool(gclid)
         )
 
