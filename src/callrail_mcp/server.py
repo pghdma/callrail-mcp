@@ -26,10 +26,10 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
 
-logging.basicConfig(
-    level=os.environ.get("CALLRAIL_LOG_LEVEL", "WARNING").upper(),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# Library hygiene: do NOT call logging.basicConfig here — that mutates the
+# host application's global logging config. Just request a logger; users
+# configure handlers/levels themselves. CALLRAIL_LOG_LEVEL is honored only
+# when this module's __main__ entry point runs (see main()).
 logger = logging.getLogger(__name__)
 
 
@@ -167,7 +167,7 @@ def list_companies(account_id: str | None = None, per_page: int = 250) -> str:
     """
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/companies.json", {"per_page": min(per_page, MAX_PER_PAGE)}))
+        return _ok(client.get(f"a/{aid}/companies.json", {"per_page": _clamp_per_page(per_page)}))
     except CallRailError as e:
         return _err(e)
 
@@ -184,7 +184,7 @@ def list_trackers(
     """
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": min(per_page, MAX_PER_PAGE), "page": page}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         if company_id:
             params["company_id"] = company_id
         return _ok(client.get(f"a/{aid}/trackers.json", params))
@@ -695,7 +695,16 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
 
 
 def main() -> None:
-    """CLI entry point for stdio transport."""
+    """CLI entry point for stdio transport.
+
+    Honors CALLRAIL_LOG_LEVEL (default: WARNING). Library callers who
+    `import callrail_mcp.server` are unaffected by this — only the
+    standalone server configures logging.
+    """
+    logging.basicConfig(
+        level=os.environ.get("CALLRAIL_LOG_LEVEL", "WARNING").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     mcp.run()
 
 

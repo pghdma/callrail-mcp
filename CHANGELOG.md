@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-24
+
+### Security
+
+- **Path traversal fixed.** Tool inputs like `call_id`, `submission_id`,
+  `tag_id`, `account_id`, `company_id` were interpolated directly into the
+  request URL via `urljoin`. A value like `../../../../etc/passwd` would
+  divert the request away from the API path. Each path segment is now
+  URL-encoded (`_safe_path`).
+- **Redirects disabled.** The CallRail API never legitimately redirects;
+  following one to an attacker-controlled host could leak the
+  `Authorization: Token token=<key>` header. `Session.max_redirects = 0`
+  + `allow_redirects=False` per request + explicit 3xx → CallRailError
+  in `_parse`.
+- **Retry-After cap.** Server-supplied `Retry-After` is now capped at
+  60 seconds so a misbehaving (or hostile) endpoint can't pin the client
+  for hours.
+
+### Fixed
+
+- **Network errors are now wrapped.** `requests.ConnectionError`, `Timeout`,
+  and `ChunkedEncodingError` previously propagated raw out of `client.get()` /
+  `.post()` / `.put()` / `.delete()`. They are now retried (same backoff as
+  5xx) and, on exhaustion, raised as `CallRailError` for a consistent error
+  contract.
+- **`Retry-After` HTTP-date format** (`"Wed, 21 Oct 2026 07:28:00 GMT"`) no
+  longer crashes the retry loop with `ValueError`. RFC 7231 second-form is
+  tried first; date form is parsed via `email.utils.parsedate_to_datetime`;
+  unparseable values fall back to exponential backoff.
+- **Non-object JSON responses** (`["a","b"]`, `"plain string"`) are now
+  rejected with a clear `CallRailError` instead of returning a value that
+  later crashes downstream `.get()` calls. Mypy `no-any-return` is satisfied.
+- **`logging.basicConfig` no longer runs at module import.** This was
+  clobbering the host application's log configuration. The CLI entry
+  point `main()` configures logging explicitly; library callers control
+  their own handlers.
+- **`paginate()` now clamps `per_page`** the same way listing tools do
+  (was the only public client method that didn't), and **logs a warning**
+  when the `max_pages` safety cap is hit (silent truncation before).
+- **`list_companies` / `list_trackers` use `_clamp_per_page` consistently**
+  with the other listing tools.
+
+### Added
+
+- `CallRailClient` is now a context manager: `with CallRailClient() as c: ...`
+  releases the underlying HTTP `Session` on exit. Plain `.close()` also works.
+- `MAX_RETRY_DELAY_SECONDS = 60.0` and `RETRYABLE_NETWORK_ERRORS` exported
+  for transparency.
+- Default `timeout` is now `(connect=5.0, read=20.0)` instead of a single
+  value — a slow connect on a flaky network won't burn the full read budget.
+
 ## [0.2.2] - 2026-04-24
 
 ### Fixed
