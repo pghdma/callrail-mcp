@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-04-25
+
+### Changed
+
+- Expanded docstrings on 12 tools (7 C-grade + 5 B-grade per Glama
+  tool-quality scoring) to match the structured-Args/Returns/Notes
+  pattern used by `list_calls`. Tools touched:
+  `list_form_submissions`, `list_text_messages`, `list_users`,
+  `get_call_recording`, `get_call_transcript`, `get_form_submission`,
+  `update_notification`, `delete_notification`, `add_call_tags`,
+  `delete_tag`, `update_company`, `get_user`. Functional behavior
+  unchanged — pure documentation improvement.
+- Added `glama.json` declaring maintainers, fixing the "No glama.json"
+  red flag on the Glama listing.
+
 ## [1.0.1] - 2026-04-24
 
 ### Changed
