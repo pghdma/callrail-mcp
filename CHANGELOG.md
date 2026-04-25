@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-04-25
+
+### Security
+
+- Bump dependency floors to fix 6 known CVEs flagged by supply-chain
+  scanners against the previous minimum-version floors:
+  - `mcp>=1.23.0` (was `>=1.2.0`) — fixes CVE-2025-53366,
+    CVE-2025-53365, CVE-2025-66416
+  - `requests>=2.33.0` (was `>=2.31.0`) — fixes CVE-2024-35195,
+    CVE-2024-47081, CVE-2026-25645
+- No code changes — fresh installs already pulled the patched
+  versions; this just makes the lower bound safe so audit tools
+  (pip-audit, mcp-marketplace) stop flagging the package.
+
 ## [1.0.2] - 2026-04-25
 
 ### Changed
