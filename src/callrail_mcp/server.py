@@ -1043,7 +1043,28 @@ def list_form_submissions(
     page: int = 1,
     fields: str | None = None,
 ) -> str:
-    """List form submissions captured by CallRail's Form Tracking."""
+    """List form submissions captured by CallRail's Form Tracking.
+    Paginated. Filterable by company and date window.
+
+    Args:
+        account_id: CallRail account ID. Auto-resolves if omitted.
+        company_id: Filter to one company. Omit for all companies.
+        days: Lookback in days (default 7). Ignored if `start_date` provided.
+        start_date: 'YYYY-MM-DD'.
+        end_date: 'YYYY-MM-DD' (defaults to today).
+        per_page: Page size (max 250).
+        page: 1-indexed.
+        fields: Comma-separated additional fields to include, e.g.
+            'company_name,form_data,referrer,landing_page_url,source,
+            utm_source,utm_medium,utm_campaign,utm_content,utm_term,
+            gclid,fbclid,form_url,form_name'.
+
+    Returns:
+        JSON string with `page`, `per_page`, `total_pages`,
+        `total_records`, and `form_submissions[]`. Each submission has
+        id ('FOR...'), submitted_at, customer details (if captured),
+        and a `form_data` dict keyed by form field name.
+    """
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
         return _err_msg(msg)
@@ -1070,7 +1091,28 @@ def list_text_messages(
     per_page: int = 100,
     page: int = 1,
 ) -> str:
-    """List SMS/text message conversations."""
+    """List SMS/text message conversations sent to or received via
+    CallRail trackers. Paginated. Filterable by company and date window.
+
+    Receiving SMS works on standard accounts. Outbound SMS sending
+    requires CallRail's A2P SMS API permission (returns 403 otherwise);
+    see `create_text_message` notes if available on your plan.
+
+    Args:
+        account_id: CallRail account ID. Auto-resolves if omitted.
+        company_id: Filter to one company. Omit for all companies.
+        days: Lookback in days (default 7). Ignored if `start_date` provided.
+        start_date: 'YYYY-MM-DD'.
+        end_date: 'YYYY-MM-DD' (defaults to today).
+        per_page: Page size (max 250).
+        page: 1-indexed.
+
+    Returns:
+        JSON string with `page`, `per_page`, `total_pages`,
+        `total_records`, and `conversations[]`. Each conversation has
+        a list of inbound + outbound messages, customer phone number,
+        the tracking number used, and timestamps.
+    """
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
         return _err_msg(msg)
@@ -1087,7 +1129,19 @@ def list_text_messages(
 
 @mcp.tool()
 def list_users(account_id: str | None = None) -> str:
-    """List users on the account."""
+    """List all users on the account. Returns a single page of up to
+    `MAX_PER_PAGE` users (no pagination support — fits small/medium
+    agency accounts).
+
+    Args:
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with `users[]`. Each user has id ('USR...'),
+        email, first_name, last_name, role
+        ('admin' | 'manager' | 'reporting'), accepted_at, time_zone,
+        and `company_ids[]` the user has access to.
+    """
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/users.json", {"per_page": MAX_PER_PAGE}))
@@ -1097,7 +1151,24 @@ def list_users(account_id: str | None = None) -> str:
 
 @mcp.tool()
 def get_call_recording(call_id: str, account_id: str | None = None) -> str:
-    """Get the recording URL for a call (if recording is enabled on the company)."""
+    """Get the recording URL for a call. Returns a short-lived signed
+    URL — fetch and use it within a few minutes before it expires.
+
+    Recording must be enabled on the company (CallRail UI > Settings >
+    Account). Calls placed BEFORE recording was enabled have no
+    recording even if it's enabled now — CallRail does not retroactively
+    record.
+
+    Args:
+        call_id: 'CAL...' id.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with `url` (signed audio URL, typically MP3) plus
+        recording metadata. Empty `url` typically means recording was
+        disabled at call time, or the user opted out via the call-flow
+        recording disclaimer.
+    """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
         return _err_msg(msg)
@@ -1113,7 +1184,23 @@ def get_call_recording(call_id: str, account_id: str | None = None) -> str:
 
 @mcp.tool()
 def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
-    """Get the AI transcript for a call (requires CallRail Conversation Intelligence)."""
+    """Get the AI transcript for a call. Requires CallRail Conversation
+    Intelligence (CallScribe) to be enabled on the company at the time
+    the call was placed.
+
+    If CallScribe was enabled AFTER the call, no transcript exists —
+    CallRail does not retroactively transcribe. Returns CallRail's 404
+    in that case.
+
+    Args:
+        call_id: 'CAL...' id.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the transcription including segments
+        (text per speaker turn), per-segment confidence scores,
+        and durations.
+    """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
         return _err_msg(msg)
@@ -1306,11 +1393,27 @@ def _clean_tag_list(tags: list[str] | None) -> list[str]:
 
 @mcp.tool()
 def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
-    """Append tags to a call without replacing existing ones.
+    """Append tags to a call WITHOUT replacing existing ones.
 
-    Empty/whitespace-only tag names are silently filtered out so that a
-    request like `add_call_tags(['', 'lead'])` won't 400 — only `'lead'`
-    is sent. Returns an error if no valid tags remain after cleaning.
+    Reads the call's current tags first, merges the new ones in, then
+    PUTs the combined list. Use this when you want to add labels (e.g.
+    'lead', 'spam', 'follow-up') without losing prior tags. To fully
+    replace tags, use `update_call(tags=[...])` instead.
+
+    Auto-creates company-level tags for any name not already in the
+    system (CallRail's default behavior). Empty/whitespace-only entries
+    are silently filtered, so `add_call_tags(['', 'lead'])` won't 400
+    — only `'lead'` is sent.
+
+    Args:
+        call_id: 'CAL...' id.
+        tags: Tag names to add. Strings only; non-strings are dropped
+            with a warning. De-duplicated. Max 100 tags per request.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the updated call object (showing the merged
+        tag list). Errors if no valid tags remain after cleaning.
     """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
@@ -1523,7 +1626,22 @@ def update_tag(
 
 @mcp.tool()
 def delete_tag(tag_id: str, account_id: str | None = None) -> str:
-    """Delete a tag. Removes it from any calls/form submissions it was on."""
+    """Delete a tag definition from the account. Removes it from any
+    calls or form submissions that had it applied.
+
+    This is a HARD delete — the tag is gone permanently along with its
+    historical applications. To preserve history, prefer renaming or
+    disabling via `update_tag` instead.
+
+    Args:
+        tag_id: Numeric tag ID. CallRail tag IDs are integers (NOT
+            the string-prefixed format other entities use). Must match
+            ^[0-9]+$ — accepts string or numeric forms.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string `{"deleted": True, "tag_id": ...}` on success.
+    """
     ok, msg = _require_non_empty(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
@@ -2789,9 +2907,36 @@ def update_company(
     form_capture: bool | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Update mutable settings on a company. Pass None to leave unchanged.
+    """Update mutable settings on a company. Pass None to leave a field
+    unchanged — only fields with explicit values are sent in the PUT
+    body.
 
-    Empty-string `name` / `time_zone` are rejected (almost always a mistake).
+    CRITICAL: Any boolean toggle you set will OVERRIDE current state.
+    If a company has CallScribe enabled and you call
+    `update_company(name='New Name')` without passing
+    `callscribe_enabled`, CallScribe stays on. But passing
+    `callscribe_enabled=False` will DISABLE CallScribe (a paid
+    feature). Be deliberate with bool args.
+
+    Empty-string `name` / `time_zone` are rejected (almost always a
+    mistake — pass None to leave them alone).
+
+    Args:
+        company_id: 'COM...' id.
+        name: New display name. Empty string rejected. Max 255 chars.
+        time_zone: IANA tz string (e.g. 'America/New_York').
+        callscore_enabled: Lead-scoring AI feature. PAID add-on.
+        lead_scoring_enabled: Older lead-scoring system.
+        swap_exclude_jquery: Skip jQuery initialization in DNI script.
+        callscribe_enabled: Conversation Intelligence (transcripts +
+            keyword spotting). PAID feature.
+        keyword_spotting_enabled: Flag calls containing watch-list
+            keywords.
+        form_capture: Enable CallRail Form Tracking on this company.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the updated company object.
     """
     ok, msg = _require_non_empty(company_id, "company_id")
     if not ok:
@@ -2858,10 +3003,17 @@ def delete_company(company_id: str, account_id: str | None = None) -> str:
 
 @mcp.tool()
 def get_user(user_id: str, account_id: str | None = None) -> str:
-    """Get full detail for one user.
+    """Get full detail for one user on the account.
 
     Args:
         user_id: 'USR...' id.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the user object — id, email, first_name,
+        last_name, role ('admin' | 'manager' | 'reporting'),
+        accepted_at (null if invitation pending), time_zone, and
+        `company_ids[]` the user can access.
     """
     ok, msg = _require_non_empty(user_id, "user_id")
     if not ok:
@@ -3063,10 +3215,20 @@ def delete_user(user_id: str, account_id: str | None = None) -> str:
 
 @mcp.tool()
 def get_form_submission(submission_id: str, account_id: str | None = None) -> str:
-    """Get full detail for one form submission.
+    """Get full detail for one form submission, including all submitted
+    field data.
+
+    Useful for retrieving the original form payload after seeing a
+    submission ID via `list_form_submissions` or in a webhook callback.
 
     Args:
         submission_id: 'FOR...' id.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the form submission — submitted_at, customer
+        details, source/UTM attribution, landing page URL, referrer,
+        and `form_data` dict keyed by form field name.
     """
     ok, msg = _require_non_empty(submission_id, "submission_id")
     if not ok:
@@ -3505,7 +3667,33 @@ def update_notification(
     email: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Update a notification rule. Pass None to leave fields unchanged."""
+    """Update a notification rule. Pass None to leave a field
+    unchanged — only fields with explicit values are sent in the PUT
+    body.
+
+    Notification rules trigger emails / desktop pushes / SMS when calls
+    or form submissions match conditions. Use this to rewire targets,
+    change triggering events, or silence a noisy rule without deleting
+    it (set all `send_*` to False).
+
+    Args:
+        notification_id: Notification rule ID.
+        name: Display name for the rule.
+        alert_type: One of: 'call_completed', 'call_missed',
+            'first_time_caller', 'voicemail', 'form_submission'.
+            Plan-specific — unknown values warn but do not reject.
+        send_email: Send email notification.
+        send_desktop: Send desktop browser push.
+        send_push: Send mobile push notification.
+        call_enabled: Trigger on call events.
+        sms_enabled: Trigger on SMS events.
+        email: Override target email (defaults to user's primary).
+            Validated as RFC-822-ish.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string with the updated notification rule.
+    """
     ok, msg = _require_non_empty(notification_id, "notification_id")
     if not ok:
         return _err_msg(msg)
@@ -3559,7 +3747,19 @@ def update_notification(
 
 @mcp.tool()
 def delete_notification(notification_id: str, account_id: str | None = None) -> str:
-    """Delete a notification rule."""
+    """Delete a notification rule. The rule is gone — to keep but mute
+    it, prefer `update_notification(send_email=False, send_desktop=False,
+    send_push=False)`.
+
+    Args:
+        notification_id: Notification rule ID.
+        account_id: CallRail account ID. Auto-resolves if omitted.
+
+    Returns:
+        JSON string `{"deleted": True, "notification_id": ...,
+        "response": ...}`. The `response` mirrors CallRail's body
+        (often empty on 204).
+    """
     ok, msg = _require_non_empty(notification_id, "notification_id")
     if not ok:
         return _err_msg(msg)
