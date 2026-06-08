@@ -1,7 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pghdma/callrail-mcp",
-  "description": "CallRail REST API v3 — 49 tools including full CRUD plus agency aggregation tools.",
+  "title": "CallRail MCP",
+  "description": "CallRail REST API v3 — 50 tools for calls, trackers, tags, users, companies, and agency reporting.",
   "repository": {
     "url": "https://github.com/pghdma/callrail-mcp",
     "source": "github"
