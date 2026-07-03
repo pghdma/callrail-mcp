@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-03
+
+### Fixed — deep-audit round 2: all-tool adversarial fuzz
+
+A mechanical fuzz pass (every tool × every parameter × 17 garbage
+values ≈ 5,000 calls) found **1,051 violations** of the project's core
+error contract ("tools never raise — always return a JSON envelope").
+Root cause: the shared validators assumed string inputs; any non-string
+type (int, list, bytes, bool, float) sent by a loose-JSON MCP client
+for a string field crashed with raw TypeError/AttributeError across
+essentially all 59 tools. Prior releases fuzzed only tracker tools, so
+the class went unseen.
+
+#### Shared-validator hardening (fixes ~all 1,051 at the root)
+- `_require_non_empty` — rejects non-string types with a clear
+  "must be a string (got int)" envelope instead of passing them
+  through to crash downstream.
+- `_validate_id_shape`, `_validate_date`, `_validate_phone`,
+  `_validate_email`, `_validate_length`, `_validate_area_code`,
+  `_validate_pool_size` — explicit type guards.
+- `_clamp_per_page` — coerces numeric strings ("250"), returns 1 on
+  garbage (previously raw TypeError from the `<` comparison).
+- New `_clamp_page` — replaces 13 inline `max(1, page)` call sites
+  that raised TypeError on string/None pages.
+- `_clean_tag_list` — non-list input returns [] with a warning
+  (mirrors `_tag_names_from`; previously iterated ints → TypeError).
+- `update_call` / `update_form_submission` / `create_form_submission`
+  — `tags` type-checked as list before `len()`.
+- `call_eligibility_check` — threshold coerced before the `< 0`
+  comparison (None/"60" previously raised TypeError).
+
+#### Behavior kept honest with docstrings
+- `delete_tag(tag_id=812)` (int form) now works — the docstring has
+  promised "accepts string or numeric forms" since v0.6.1 but int
+  input crashed with TypeError. get_tag/update_tag same.
+- `search_calls_by_number(phone_number=4125551234)` — a phone number
+  arriving as a JSON number is now coerced instead of crashing.
+
+#### Wire safety
+- **NaN/Infinity rejected in `value` params** (`update_form_submission`,
+  `create_form_submission`, `update_sms_thread`). `json.dumps`
+  serializes non-finite floats as bare `NaN`/`Infinity` tokens —
+  invalid JSON on the wire to CallRail.
+
+#### Response-shape robustness (client.py)
+- `paginate()` — a malformed response with a STRING where the items
+  array belongs would `yield from` single characters; consumers then
+  crashed on `'str'.get()`. Non-list items now stop pagination with
+  a warning.
+- `resolve_account_id()` — `accounts` as a dict raised raw
+  `KeyError: 0`; now a catchable CallRailError.
+
+### Added — tests
+- **`tests/test_fuzz_all_tools.py`** — the full adversarial matrix
+  (59 tools × every param × 17 garbage values, ~5k calls) is now a
+  permanent regression test pinning the never-raise invariant.
+- 6 targeted regressions (paginate string-items, dict accounts,
+  NaN value ×3 tools, int tag_id, JSON-number phone, clamp helpers).
+- Tests 320 → 385.
+
 ## [1.1.0] - 2026-07-03
 
 ### Added — 9 new tools (API caught up with us, so we caught up with it)

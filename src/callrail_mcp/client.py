@@ -192,7 +192,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.1.0 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.1.1 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -379,6 +379,13 @@ class CallRailClient:
             return account_id
         data = self.get("a.json")
         accounts = data.get("accounts") or data.get("agencies") or []
+        # Defensive: a dict here would raise raw KeyError on accounts[0]
+        # below (uncaught by tool bodies, which only catch CallRailError).
+        if not isinstance(accounts, list):
+            raise CallRailError(
+                f"Unexpected accounts type from CallRail: "
+                f"{type(accounts).__name__}; expected list."
+            )
         if not accounts:
             raise CallRailError("No CallRail accounts accessible with this API key")
         first = accounts[0]
@@ -431,7 +438,18 @@ class CallRailClient:
                         break
             if not key or not data.get(key):
                 break
-            yield from data[key]
+            items = data[key]
+            # Defensive: a malformed response with a STRING where the
+            # items array belongs would make `yield from` emit single
+            # characters — consumers then crash on 'str'.get(). Treat
+            # non-list items as end-of-data with a warning.
+            if not isinstance(items, list):
+                logger.warning(
+                    "paginate(%s): expected list under %r, got %s — "
+                    "stopping pagination.", path, key, type(items).__name__,
+                )
+                break
+            yield from items
             # Use total_pages when present and >0 to detect end-of-results.
             # Some endpoints omit it or report 0 — in those cases fall back
             # to "stop on empty page" (handled by the not data.get(key)

@@ -110,7 +110,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.1.0
+## Current version: 1.1.1
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -138,7 +138,7 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.7.0` — Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
 - `1.0.0` — **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
 
-**Tests: 320 passing. 59 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 385 passing. 59 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Future work (deferred — see "API coverage limits" above)
 
