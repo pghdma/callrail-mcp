@@ -48,18 +48,21 @@ RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
     ChunkedEncodingError,
 )
 
-# Discovered empirically by exhaustive testing against the v3 tags endpoint
-# (the docs don't enumerate this). Any other value returns
-# 400 "Color is not included in the list".
+# Originally discovered empirically (10 values); CallRail has since
+# documented the full set of 24 at apidocs.callrail.com (#available-colors).
+# Live-verified 2026-07-03: create_tag(color="cyan1") succeeds — the old
+# 10-value tuple was rejecting 14 documented-valid colors. Any value
+# outside this set returns 400 "Color is not included in the list".
 VALID_TAG_COLORS: tuple[str, ...] = (
-    "red1", "red2",
-    "orange1",
-    "yellow1",
-    "green1",
-    "blue1",
-    "purple1",
-    "pink1",
     "gray1", "gray2",
+    "blue1", "blue2",
+    "cyan1", "cyan2",
+    "purple1", "purple2",
+    "pink1", "pink2", "pink3", "pink4",
+    "red1", "red2",
+    "orange1", "orange2", "orange3", "orange4",
+    "yellow1", "yellow2",
+    "green1", "green2", "green3", "green4",
 )
 
 
@@ -189,7 +192,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.0.3 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.1.0 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 

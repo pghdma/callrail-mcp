@@ -35,22 +35,42 @@ Claude Code restart required after `pipx install --force` for new tools to show 
 - **Every tool returns a JSON string via `_ok()` or `_err()`.** Never raise from a tool body — catch `CallRailError` and format.
 - **Pre-validate tool inputs before calling `client.resolve_account_id()`** — avoids burning an API call to fetch the account for a request that would fail validation anyway.
 - **`_safe_path()` encodes EVERY path segment** used in the URL. Rejects dot-segments and control chars. Any new tool that interpolates a user-controllable id (call_id, tracker_id, tag_id, etc.) into a path must go through `client.get/post/put/delete` (which use `_safe_path` internally).
-- **Discovered enums are tuples in `client.py`:** `VALID_TAG_COLORS`, `VALID_TRACKER_TYPES`, `VALID_SOURCE_TYPES`. Update these as new valid values are discovered. Client-side validation uses them to fail fast with helpful error messages.
+- **Enum tuples:** `VALID_TAG_COLORS` (client.py, 24 documented values as of 2026-07; cyan1 live-verified), `VALID_TRACKER_TYPES`, `VALID_SOURCE_TYPES` (server.py, 12 = 10 documented + facebook_all/bing_all which docs still omit). CallRail now documents these at apidocs.callrail.com — check docs first, probe live second.
 - **No `logging.basicConfig()` at import time.** Library hygiene — only `main()` (CLI entry) configures logging.
 - **Lazy client init.** `server.get_client()` is the accessor; `server.client` is a proxy for back-compat. Module import must not require a key.
 
 ## API coverage limits — endpoints we deliberately did NOT ship
 
-Probed live against PGHDMA's account 2026-04-24 and found these
-endpoints exist but return **403 "You do not have permission"** for
-standard CallRail accounts. Re-attempt if account is upgraded:
+Probed live 2026-04-24, re-probed 2026-07-03. These endpoints are
+documented but return **403 "You do not have permission"** on this
+account. Re-attempt if account/plan is upgraded:
 
-- **`POST /a/{aid}/text-messages.json`** (send SMS) — needs A2P SMS
-  registration / dedicated SMS API permission. CallRail enforces
-  TCPA-compliance keywords (STOP/CANCEL/UNSUBSCRIBE) on outbound.
+- **`POST /a/{aid}/text-messages.json`** (send SMS; MMS supported
+  since 2026-05-05 via media_url/media_file) — needs A2P/TCR SMS
+  registration. CallRail enforces TCPA-compliance keywords
+  (STOP/CANCEL/UNSUBSCRIBE) on outbound.
 - **`POST /a/{aid}/integrations.json`** (create webhook integration) —
-  needs Integration-Admin permission. CallRail webhooks are managed
-  via the integrations endpoint with `type=Webhook`.
+  needs Integration-Admin permission.
+- **Outbound Caller IDs** (`/caller_ids.json` CRUD) — now DOCUMENTED
+  (was UI-only in April) but still 403 on this account. Support ticket
+  may unlock.
+- **Message Flows** (`/message-flows.json` CRUD — SMS auto-reply
+  flows) — documented, 403.
+- **Integration Filters** (`/integration_triggers.json` CRUD) —
+  documented, 403.
+
+Shipped in v1.1.0 (were new since April): leads + timelines,
+sms-threads (incl. PUT), calls/summary + calls/timeseries +
+forms/summary, page_views. Still unshipped but AVAILABLE (probed 200,
+low value): summary_emails CRUD, companies/bulk_update.json
+(external_form_capture only), form_submissions/ignored_fields.json.
+
+⚠️ CallRail breaking change 2026-05-21: transcripts (endpoint + fields)
+return 404/null without Premium Conversation Intelligence.
+get_call_transcript surfaces a hint on 404.
+
+CallRail also now ships an official hosted OAuth MCP server (~30
+tools, URL via account team) — see README comparison section.
 
 Endpoints we built but the user should know are permission-sensitive:
 - `create_outbound_call` works on standard accounts but **places a
@@ -73,8 +93,8 @@ plans):
 - `value` field on PUT /calls returns **HTTP 500** from CallRail. Do not expose on `update_call`. Works on form submissions.
 - `Retry-After` can be seconds-int OR HTTP-date. `_parse_retry_after` handles both + caps at 60s.
 - CallRail can return JSON arrays where docs suggest objects — `_parse` rejects non-object responses with CallRailError.
-- Tag colors: only `red1 red2 orange1 yellow1 green1 blue1 purple1 pink1 gray1 gray2`. Anything else = 400.
-- Tracker source.type: 7 known-valid values: `all direct offline google_my_business google_ad_extension facebook_all bing_all`. Anything else = 400. For multi-source DNI use `type='session'` pools.
+- Tag colors: 24 documented values (see VALID_TAG_COLORS). Anything else = 400. (Was 10 empirical values pre-2026-07; docs now enumerate.)
+- Tracker source.type: 12 known-valid values (10 documented + facebook_all/bing_all). Anything else = 400. For multi-source DNI use `type='session'` pools.
 - Tag create/`add_call_tags` with unknown names **auto-creates tags at the company level** as a side effect.
 - `confirm_billing=True` is REQUIRED on `create_tracker` — defensive against AI exploration. Costs money (~$3/mo/number).
 
@@ -90,7 +110,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.0.0
+## Current version: 1.1.0
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0` — initial 12 read tools
@@ -118,7 +138,7 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.7.0` — Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
 - `1.0.0` — **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
 
-**Tests: 297 passing. Coverage: 84%. 49 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 320 passing. 59 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
 ## Future work (deferred — see "API coverage limits" above)
 

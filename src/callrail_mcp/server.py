@@ -538,18 +538,28 @@ def list_companies(
 
 
 VALID_TRACKER_TYPES: tuple[str, ...] = ("source", "session")
-# Discovered empirically by exhaustive testing + live production trackers
-# observed in the wild — CallRail's docs do not enumerate these. Any other
-# source.type value returns 400 "Source Unknown tracking source type".
+# Union of CallRail's now-documented enum (apidocs.callrail.com
+# #source-tracker-call-sources, published since we discovered the
+# original set empirically) and values proven working in production
+# that the docs still omit (facebook_all / bing_all — live trackers
+# exist using them). Any other source.type value returns 400
+# "Source Unknown tracking source type".
 #
 # If you encounter a 400 when using a source type that's clearly valid in
 # the CallRail UI, add it here and open an issue/PR.
 VALID_SOURCE_TYPES: tuple[str, ...] = (
+    # Documented:
     "all",
-    "direct",
+    "landing_url",
+    "landing_params",
     "offline",
+    "web_referrer",
+    "direct",
+    "search",
+    "google_ad_extension",   # Google Ads call extensions
+    "mobile_ad_extension",
     "google_my_business",
-    "google_ad_extension",  # Google Ads call extensions
+    # Empirical (in production use, absent from the documented list):
     "facebook_all",          # Facebook/Meta ads (observed in production)
     "bing_all",              # Bing/Microsoft Ads (observed in production)
 )
@@ -1207,8 +1217,14 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
     the call was placed.
 
     If CallScribe was enabled AFTER the call, no transcript exists —
-    CallRail does not retroactively transcribe. Returns CallRail's 404
-    in that case.
+    CallRail does not retroactively transcribe.
+
+    ⚠️  As of CallRail's 2026-05-21 API change, transcript data requires
+    a **Premium Conversation Intelligence** subscription — without it,
+    the endpoint 404s (and the `transcription` field on calls returns
+    null) even when a transcript exists. A 404 here therefore means
+    EITHER "no transcript for this call" OR "plan doesn't include
+    transcript API access"; the error envelope includes a hint.
 
     Args:
         call_id: 'CAL...' id.
@@ -1229,6 +1245,23 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/calls/{call_id}/transcription.json"))
     except CallRailError as e:
+        if e.status == 404:
+            # Disambiguate the two 404 causes so users don't chase a
+            # nonexistent bug in their CallScribe settings.
+            return json.dumps({
+                "error": True,
+                "status": 404,
+                "message": str(e),
+                "hint": (
+                    "404 here means either (a) no transcript exists for "
+                    "this call (CallScribe wasn't enabled at call time — "
+                    "CallRail does not retroactively transcribe), or "
+                    "(b) since CallRail's 2026-05-21 API change, your "
+                    "plan lacks Premium Conversation Intelligence, which "
+                    "is now required for transcript API access even when "
+                    "a transcript exists in the UI."
+                ),
+            }, indent=2)
         return _err(e)
 
 
@@ -1576,9 +1609,9 @@ def create_tag(
         name: Tag display name.
         company_id: Required — tags are per-company in CallRail.
         account_id: Auto-resolves if omitted.
-        color: One of the 10 CallRail-supported colors:
-            'red1', 'red2', 'orange1', 'yellow1', 'green1',
-            'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
+        color: One of the 24 CallRail-supported colors (see
+            VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
+            pink1-4, red1-2, orange1-4, yellow1-2, green1-4.
             If omitted, CallRail defaults to 'gray1'.
     """
     # Fail fast pre-network (project convention: validate before burning
@@ -1623,8 +1656,9 @@ def update_tag(
         tag_id: Numeric tag id.
         account_id: Auto-resolves if omitted.
         name: New display name.
-        color: One of: 'red1', 'red2', 'orange1', 'yellow1', 'green1',
-            'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
+        color: One of the 24 CallRail-supported colors (see
+            VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
+            pink1-4, red1-2, orange1-4, yellow1-2, green1-4.
     """
     ok, msg = _require_non_empty(tag_id, "tag_id")
     if not ok:
@@ -3860,6 +3894,387 @@ def list_notifications(
         if user_id:
             params["user_id"] = user_id
         return _ok(client.get(f"a/{aid}/notifications.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+# ============================================================
+# v1.1.0 — Leads, SMS threads, server-side analytics, page views.
+# All endpoint shapes live-verified against a production account
+# 2026-07-03 (read-only probes; see CHANGELOG).
+# ============================================================
+
+# Documented group_by dimensions for /calls/summary.json and
+# /calls/timeseries.json (apidocs.callrail.com). Server 400s on others.
+VALID_CALL_STATS_GROUP_BY: tuple[str, ...] = (
+    "source", "keywords", "campaign", "referrer", "landing_page", "company",
+)
+
+
+@mcp.tool()
+def list_leads(
+    account_id: str | None = None,
+    company_id: str | None = None,
+    per_page: int = 100,
+    page: int = 1,
+) -> str:
+    """List leads (unique people) across calls, forms, and texts.
+
+    A lead is CallRail's deduplicated person record — one entry per
+    customer regardless of how many times they called / submitted /
+    texted. Use `get_lead_timeline` for a lead's full cross-channel
+    history.
+
+    Args:
+        account_id: Auto-resolves if omitted.
+        company_id: Filter to one company.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+
+    Returns:
+        JSON string with `page`, `per_page`, `total_pages`,
+        `total_records`, and `leads[]`. Each lead has id ('PER...'),
+        name, phone, email, company_id, company_name, created_at.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        if company_id:
+            params["company_id"] = company_id
+        return _ok(client.get(f"a/{aid}/leads.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_lead_timeline(
+    lead_id: str,
+    account_id: str | None = None,
+    per_page: int = 100,
+    page: int = 1,
+) -> str:
+    """Get a lead's full cross-channel activity timeline — every call,
+    form submission, and text thread from that person in one response,
+    with first-touch/last-touch attribution.
+
+    This replaces the manual "search calls by number + search forms by
+    email" dance when reconstructing a customer's history.
+
+    Args:
+        lead_id: 'PER...' lead id (from `list_leads`).
+        account_id: Auto-resolves if omitted.
+        per_page: Timeline page size (max 250).
+        page: 1-indexed.
+
+    Returns:
+        JSON string with `lead` (the person record) and `timeline[]`
+        (chronological interaction entries, paginated).
+    """
+    ok, msg = _require_non_empty(lead_id, "lead_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(lead_id, "lead_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        return _ok(client.get(f"a/{aid}/leads/{lead_id}/timeline.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def list_sms_threads(
+    account_id: str | None = None,
+    company_id: str | None = None,
+    per_page: int = 100,
+    page: int = 1,
+) -> str:
+    """List SMS threads. Unlike `list_text_messages` (conversation
+    transcripts), threads carry the lead-management surface: `notes`,
+    `value`, `tags`, `lead_qualification`, `state` — and are UPDATABLE
+    via `update_sms_thread`.
+
+    Args:
+        account_id: Auto-resolves if omitted.
+        company_id: Filter to one company.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+
+    Returns:
+        JSON string with `sms_threads[]`. Each thread has id,
+        customer_name / customer_phone_number, current + initial
+        tracker/tracking-number, notes, value, tags,
+        lead_qualification, state.
+    """
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        if company_id:
+            params["company_id"] = company_id
+        return _ok(client.get(f"a/{aid}/sms-threads.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_sms_thread(thread_id: str, account_id: str | None = None) -> str:
+    """Get one SMS thread's lead-management record (notes, value, tags,
+    lead_qualification, state). For the message transcript itself use
+    `get_text_message` with the conversation id.
+
+    Args:
+        thread_id: Thread id (from `list_sms_threads`).
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(thread_id, "thread_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(thread_id, "thread_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(thread_id, "thread_id")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.get(f"a/{aid}/sms-threads/{thread_id}.json"))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def update_sms_thread(
+    thread_id: str,
+    notes: str | None = None,
+    value: float | None = None,
+    tags: list[str] | None = None,
+    append_tags: bool = True,
+    lead_qualification: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Update an SMS thread's lead-management fields — the texting
+    equivalent of `update_call`. Closes the gap where texting leads
+    couldn't be tagged / noted / qualified via API.
+
+    Args:
+        thread_id: Thread id (from `list_sms_threads`).
+        notes: Note text (max 4000 chars). Empty string rejected.
+        value: Numeric lead value.
+        tags: Tag names to apply (max 100).
+        append_tags: If True (default), `tags` are ADDED to existing
+            ones (CallRail's `append_tags` flag). If False, `tags`
+            REPLACES the thread's tag list.
+        lead_qualification: e.g. 'good_lead', 'not_a_lead'. Values are
+            plan-configurable so unknown strings are passed through.
+        account_id: Auto-resolves if omitted.
+    """
+    ok, msg = _require_non_empty(thread_id, "thread_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(thread_id, "thread_id", _MAX_ID_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(thread_id, "thread_id")
+    if not ok:
+        return _err_msg(msg)
+    if notes is not None:
+        ok, msg = _require_non_empty(notes, "notes")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_length(notes, "notes", _MAX_NOTE_LEN)
+        if not ok:
+            return _err_msg(msg)
+    if lead_qualification is not None:
+        ok, msg = _require_non_empty(lead_qualification, "lead_qualification")
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None:
+        cleaned = _clean_tag_list(tags)
+        if not cleaned:
+            return _err_msg("tags is empty (or only contained empty/whitespace strings).")
+        if len(cleaned) > _MAX_TAGS_PER_REQUEST:
+            return _err_msg(
+                f"tags list length {len(cleaned)} exceeds max {_MAX_TAGS_PER_REQUEST}."
+            )
+        tags = cleaned
+    body: dict[str, Any] = {}
+    if notes is not None:
+        body["notes"] = notes
+    if value is not None:
+        body["value"] = value
+    if tags is not None:
+        body["tags"] = tags
+        body["append_tags"] = append_tags
+    if lead_qualification is not None:
+        body["lead_qualification"] = lead_qualification
+    if not body:
+        return _err_msg("No fields supplied to update.")
+    try:
+        aid = client.resolve_account_id(account_id)
+        return _ok(client.put(f"a/{aid}/sms-threads/{thread_id}.json", body))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def call_stats(
+    group_by: str = "source",
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    company_id: str | None = None,
+    fields: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Server-side call aggregation via CallRail's /calls/summary.json.
+
+    One request instead of paginating every call — prefer this over
+    `call_summary` (which fetches and counts calls client-side) when
+    you only need grouped totals. `call_summary` remains useful for
+    metrics this endpoint doesn't expose (first-time vs repeat split,
+    per-source-name breakdown, exact duration sums).
+
+    Args:
+        group_by: Dimension to group by. One of: 'source', 'keywords',
+            'campaign', 'referrer', 'landing_page', 'company'.
+        days: Lookback (default 30). Ignored if `start_date` given.
+        start_date / end_date: 'YYYY-MM-DD'. Explicit dates win.
+        company_id: Filter to one company.
+        fields: Comma-separated metrics, e.g.
+            'total_calls,missed_calls,answered_calls,first_time_callers,
+            average_duration,leads'. Default: total_calls only.
+        account_id: Auto-resolves if omitted.
+
+    Returns:
+        JSON string with `start_date`, `end_date`, `time_zone`,
+        `total_results` and `grouped_results[]` ({key, <metrics>}).
+    """
+    if group_by not in VALID_CALL_STATS_GROUP_BY:
+        return _err_msg(
+            f"group_by={group_by!r} must be one of {VALID_CALL_STATS_GROUP_BY}."
+        )
+    ok, msg = _validate_window(days, start_date, end_date, require_window=True)
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"group_by": group_by}
+        params.update(_date_window(days, start_date, end_date))
+        if company_id:
+            params["company_id"] = company_id
+        if fields:
+            params["fields"] = fields
+        return _ok(client.get(f"a/{aid}/calls/summary.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def call_timeseries(
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    company_id: str | None = None,
+    fields: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Per-day call volume via CallRail's /calls/timeseries.json — one
+    request for a daily trend line instead of client-side bucketing.
+
+    Args:
+        days: Lookback (default 30). Ignored if `start_date` given.
+        start_date / end_date: 'YYYY-MM-DD'. Explicit dates win.
+        company_id: Filter to one company.
+        fields: Comma-separated metrics (same set as `call_stats`).
+        account_id: Auto-resolves if omitted.
+
+    Returns:
+        JSON string with `total_results` and `data[]` — one entry per
+        day ({key/date, <metrics>}).
+    """
+    ok, msg = _validate_window(days, start_date, end_date, require_window=True)
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {}
+        params.update(_date_window(days, start_date, end_date))
+        if company_id:
+            params["company_id"] = company_id
+        if fields:
+            params["fields"] = fields
+        return _ok(client.get(f"a/{aid}/calls/timeseries.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def form_stats(
+    days: int = 30,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    company_id: str | None = None,
+    account_id: str | None = None,
+) -> str:
+    """Server-side form-submission totals via /forms/summary.json.
+
+    Args:
+        days: Lookback (default 30). Ignored if `start_date` given.
+        start_date / end_date: 'YYYY-MM-DD'. Explicit dates win.
+        company_id: Filter to one company.
+        account_id: Auto-resolves if omitted.
+
+    Returns:
+        JSON string with `start_date`, `end_date`, `time_zone`, and
+        `total_results` (e.g. {"total_forms": N}).
+    """
+    ok, msg = _validate_window(days, start_date, end_date, require_window=True)
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {}
+        params.update(_date_window(days, start_date, end_date))
+        if company_id:
+            params["company_id"] = company_id
+        return _ok(client.get(f"a/{aid}/forms/summary.json", params))
+    except CallRailError as e:
+        return _err(e)
+
+
+@mcp.tool()
+def get_call_page_views(
+    call_id: str,
+    account_id: str | None = None,
+    per_page: int = 100,
+    page: int = 1,
+) -> str:
+    """Get the visitor's page-view history behind a call — which pages
+    they browsed (with timestamps) before and around dialing. Pairs
+    with `call_eligibility_check` for conversion debugging: shows the
+    actual session journey that led to the call.
+
+    Args:
+        call_id: 'CAL...' id.
+        account_id: Auto-resolves if omitted.
+        per_page: Page size (max 250).
+        page: 1-indexed.
+
+    Returns:
+        JSON string with `page_views[]` (paginated).
+    """
+    ok, msg = _require_non_empty(call_id, "call_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
+    if not ok:
+        return _err_msg(msg)
+    try:
+        aid = client.resolve_account_id(account_id)
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        return _ok(client.get(f"a/{aid}/calls/{call_id}/page_views.json", params))
     except CallRailError as e:
         return _err(e)
 

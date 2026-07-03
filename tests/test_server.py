@@ -3437,3 +3437,225 @@ def test_v105_list_companies_page_param(server_with_mock_client) -> None:
     assert out["companies"][0]["id"] == "COM_page2"
     # Assert the page param actually reached the wire.
     assert "page=2" in responses.calls[-1].request.url
+
+
+# ============================================================
+# v1.1.0 — new tools (leads, SMS threads, server-side stats,
+# page views) + enum expansion + transcript-gating hint
+# ============================================================
+
+
+def _stub_account() -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+
+
+@responses.activate
+def test_v110_list_leads(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/leads.json",
+        json={"leads": [{"id": "PER1", "name": "Kevin"}], "total_records": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.list_leads(company_id="COM1"))
+    assert out["leads"][0]["id"] == "PER1"
+    assert "company_id=COM1" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_v110_get_lead_timeline(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/leads/PER1/timeline.json",
+        json={"lead": {"id": "PER1"}, "timeline": [{"type": "call"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.get_lead_timeline(lead_id="PER1"))
+    assert out["timeline"][0]["type"] == "call"
+
+
+def test_v110_get_lead_timeline_rejects_empty_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.get_lead_timeline(lead_id=""))
+    assert out["error"] is True and "lead_id" in out["message"]
+
+
+@responses.activate
+def test_v110_list_and_get_sms_threads(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/sms-threads.json",
+        json={"sms_threads": [{"id": "THR1", "lead_qualification": None}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/sms-threads/THR1.json",
+        json={"id": "THR1", "notes": None, "tags": []},
+        status=200,
+    )
+    out = json.loads(server_mod.list_sms_threads())
+    assert out["sms_threads"][0]["id"] == "THR1"
+    out = json.loads(server_mod.get_sms_thread(thread_id="THR1"))
+    assert out["id"] == "THR1"
+
+
+@responses.activate
+def test_v110_update_sms_thread_body(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/sms-threads/THR1.json",
+        json={"id": "THR1", "tags": [{"name": "hot"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.update_sms_thread(
+        thread_id="THR1", tags=["hot"], notes="called back",
+        lead_qualification="good_lead",
+    ))
+    assert out["id"] == "THR1"
+    body = json.loads(responses.calls[-1].request.body)
+    assert body == {
+        "notes": "called back",
+        "tags": ["hot"],
+        "append_tags": True,
+        "lead_qualification": "good_lead",
+    }
+
+
+def test_v110_update_sms_thread_requires_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.update_sms_thread(thread_id="THR1"))
+    assert out["error"] is True and "No fields" in out["message"]
+    out = json.loads(server_mod.update_sms_thread(thread_id="THR1", notes="x" * 4001))
+    assert out["error"] is True and "length" in out["message"]
+
+
+@responses.activate
+def test_v110_call_stats(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/summary.json",
+        json={
+            "total_results": {"total_calls": 232},
+            "grouped_by": "source",
+            "grouped_results": [{"key": "Direct", "total_calls": 11}],
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.call_stats(group_by="source", days=7))
+    assert out["total_results"]["total_calls"] == 232
+    assert "group_by=source" in responses.calls[-1].request.url
+
+
+def test_v110_call_stats_rejects_bad_group_by(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.call_stats(group_by="astrology"))
+    assert out["error"] is True and "group_by" in out["message"]
+    # require_window holds: days=0 with no dates rejected.
+    out = json.loads(server_mod.call_stats(group_by="source", days=0))
+    assert out["error"] is True
+
+
+@responses.activate
+def test_v110_call_timeseries_and_form_stats(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/timeseries.json",
+        json={"total_results": {"total_calls": 5}, "data": [{"date": "2026-07-01", "total_calls": 5}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/forms/summary.json",
+        json={"total_results": {"total_forms": 3}},
+        status=200,
+    )
+    out = json.loads(server_mod.call_timeseries(days=7))
+    assert out["data"][0]["total_calls"] == 5
+    out = json.loads(server_mod.form_stats(days=7))
+    assert out["total_results"]["total_forms"] == 3
+
+
+@responses.activate
+def test_v110_get_call_page_views(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL9/page_views.json",
+        json={"page_views": [{"url": "/pricing"}]},
+        status=200,
+    )
+    out = json.loads(server_mod.get_call_page_views(call_id="CAL9"))
+    assert out["page_views"][0]["url"] == "/pricing"
+
+
+def test_v110_page_views_requires_cal_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.get_call_page_views(call_id="XYZ9"))
+    assert out["error"] is True and "CAL" in out["message"]
+
+
+def test_v110_tag_colors_expanded() -> None:
+    """The 24 documented colors (cyan1 live-verified 2026-07-03) must
+    pass client-side validation; garbage must still fail."""
+    from callrail_mcp.client import VALID_TAG_COLORS
+
+    assert len(VALID_TAG_COLORS) == 24
+    for c in ("cyan1", "green4", "pink3", "orange4", "blue2", "yellow2"):
+        assert c in VALID_TAG_COLORS
+    assert "mauve1" not in VALID_TAG_COLORS
+
+
+def test_v110_source_types_expanded() -> None:
+    """Documented values added; empirically-proven ones kept."""
+    from callrail_mcp.server import VALID_SOURCE_TYPES
+
+    for s in ("landing_url", "landing_params", "web_referrer", "search",
+              "mobile_ad_extension"):
+        assert s in VALID_SOURCE_TYPES
+    # Production-proven values the docs still omit must remain.
+    assert "facebook_all" in VALID_SOURCE_TYPES
+    assert "bing_all" in VALID_SOURCE_TYPES
+
+
+@responses.activate
+def test_v110_transcript_404_carries_premium_ci_hint(
+    server_with_mock_client,
+) -> None:
+    """Since CallRail's 2026-05-21 change, transcript 404s are ambiguous
+    (no transcript vs no Premium CI subscription) — the envelope must
+    say so instead of returning a bare 404."""
+    _stub_account()
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL404/transcription.json",
+        json={"error": "not found"},
+        status=404,
+    )
+    out = json.loads(server_mod.get_call_transcript(call_id="CAL404"))
+    assert out["error"] is True
+    assert out["status"] == 404
+    assert "Premium Conversation Intelligence" in out["hint"]
