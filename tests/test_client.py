@@ -210,10 +210,16 @@ def test_post_retries_on_429(client: CallRailClient) -> None:
 # ---- tag color enum ----
 
 def test_valid_tag_colors_contains_known_values() -> None:
-    """The set discovered by exhaustive API testing — guards against accidental
-    edits that would remove a real value or accept an unsupported one."""
-    expected = {"red1", "red2", "orange1", "yellow1", "green1",
-                "blue1", "purple1", "pink1", "gray1", "gray2"}
+    """The 24-value set documented at apidocs.callrail.com (#available-colors),
+    live-verified 2026-07-03 (create_tag color=cyan1 succeeded). Guards
+    against accidental edits that would remove a real value or accept an
+    unsupported one."""
+    expected = {
+        "gray1", "gray2", "blue1", "blue2", "cyan1", "cyan2",
+        "purple1", "purple2", "pink1", "pink2", "pink3", "pink4",
+        "red1", "red2", "orange1", "orange2", "orange3", "orange4",
+        "yellow1", "yellow2", "green1", "green2", "green3", "green4",
+    }
     assert set(VALID_TAG_COLORS) == expected
 
 

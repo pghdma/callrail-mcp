@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-03
+
+### Added — 9 new tools (API caught up with us, so we caught up with it)
+
+CallRail shipped substantial API surface between April and July 2026.
+All endpoint shapes below were live-verified against a production
+account on 2026-07-03 (read-only probes) before implementation.
+
+- **`list_leads`** / **`get_lead_timeline`** — CallRail's deduplicated
+  person records + full cross-channel history (calls, forms, texts)
+  per lead with first/last-touch attribution. Replaces the manual
+  "search calls by number + search forms by email" reconstruction.
+- **`list_sms_threads`** / **`get_sms_thread`** / **`update_sms_thread`**
+  — SMS-thread lead management. `update_sms_thread` closes the write
+  gap where texting leads couldn't be tagged / noted / qualified via
+  API (notes, value, tags with `append_tags`, lead_qualification).
+- **`call_stats`** — server-side aggregation via `/calls/summary.json`
+  (group_by source/keywords/campaign/referrer/landing_page/company).
+  One request instead of paginating every call.
+- **`call_timeseries`** — per-day call-volume trend via
+  `/calls/timeseries.json`.
+- **`form_stats`** — server-side form totals via `/forms/summary.json`.
+- **`get_call_page_views`** — the visitor's page-view journey behind a
+  call; pairs with `call_eligibility_check` for conversion debugging.
+
+### Changed — validators updated to CallRail's newly-published enums
+
+CallRail has now documented enums we originally discovered empirically
+— and our fail-fast validation had become over-restrictive:
+
+- **`VALID_TAG_COLORS`: 10 → 24 values.** The docs now publish the full
+  24-color table; our 10-value tuple was rejecting 14 documented-valid
+  colors. Live-verified 2026-07-03: `create_tag(color="cyan1")`
+  succeeds (probe tag created + deleted).
+- **`VALID_SOURCE_TYPES`: 7 → 12 values.** Union of the 10 documented
+  values (adds `landing_url`, `landing_params`, `web_referrer`,
+  `search`, `mobile_ad_extension`) and the 2 production-proven values
+  the docs still omit (`facebook_all`, `bing_all`).
+
+### Changed — transcript gating (CallRail breaking change 2026-05-21)
+
+- **`get_call_transcript` 404s now carry a disambiguation hint.**
+  CallRail's 2026-05-21 API change gates transcript data behind
+  Premium Conversation Intelligence — without it the endpoint 404s
+  even when a transcript exists in the UI. The error envelope now
+  explains both possible causes instead of returning a bare 404.
+
+### Documentation
+
+- README: new "How this compares to CallRail's official MCP server"
+  section (CallRail shipped a hosted OAuth MCP server ~30 tools;
+  this project stays pip-installable, local, 59 tools, with agency
+  cost-attribution tooling the official one lacks).
+- CLAUDE.md: API-coverage notes refreshed for July 2026 (outbound
+  caller IDs now documented-but-403, MMS send shipped May 5 but still
+  needs A2P registration, message flows + integration filters
+  documented-but-403).
+
+### Added — tests
+
+- 14 new tests (306 → 320): all 9 new tools (happy paths + validation
+  rejections + PUT body shape), enum expansion guards, transcript-404
+  hint. Tag-color guard test updated to pin the 24-value set.
+
+## [1.0.4] - 2026-07-03
+
+Not published to PyPI — these fixes ship in 1.1.0. (The version number
+1.0.4 was consumed by an MCP-registry manifest metadata bump: title +
+corrected tool count; the registry rejects re-publishing a version.)
+
 ### Fixed (fresh-eyes audit — 5 bugs, 1 HIGH)
 
 #### HIGH

@@ -98,7 +98,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 
 ## Available tools
 
-**49 tools total** — ~85% of CallRail's REST API v3 surface. Read tools, write tools, tracker provisioning, agency aggregation, account management (Companies/Users CRUD), notifications, integrations discovery, outbound calls, and offline-lead backfill via `create_form_submission`.
+**59 tools total** — ~95% of CallRail's REST API v3 surface. Read tools, write tools, tracker provisioning, agency aggregation, account management (Companies/Users CRUD), notifications, integrations discovery, outbound calls, offline-lead backfill via `create_form_submission`, and (new in v1.1) leads, SMS-thread lead management, server-side analytics, and per-call page views.
 
 ### Read tools
 
@@ -161,7 +161,18 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 |---|---|
 | `create_outbound_call` | Place an outbound call (CallRail dials your tracker first, then bridges to recipient). **Requires `confirm_dialing=True`** as a safety guard — actually dials a real phone, costs minutes, has legal implications |
 
-Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` ∈ [1, 50] (safety cap to prevent accidental 5-figure provisioning bills), name/whisper/greeting length caps, source-type enum (`all`, `direct`, `offline`, `google_my_business`, `google_ad_extension`, `facebook_all`, `bing_all`).
+Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` ∈ [1, 50] (safety cap to prevent accidental 5-figure provisioning bills), name/whisper/greeting length caps, source-type enum (12 values: the 10 documented at apidocs.callrail.com plus `facebook_all` / `bing_all` which are proven in production but still absent from the docs). Tag colors validate against the full documented 24-color set.
+
+### Leads & server-side analytics *(v1.1+)*
+
+| Tool | Purpose |
+|---|---|
+| `list_leads` / `get_lead_timeline` | CallRail's deduplicated person records + full cross-channel history (calls + forms + texts) per lead, with first/last-touch attribution |
+| `list_sms_threads` / `get_sms_thread` / `update_sms_thread` | SMS-thread lead management — tag / note / qualify texting leads like calls (`update_sms_thread` closes the texting write gap) |
+| `call_stats` | Server-side call aggregation (`/calls/summary.json`) — grouped totals by source / keywords / campaign / referrer / landing_page / company in ONE request instead of paginating every call |
+| `call_timeseries` | Per-day call-volume trend line (`/calls/timeseries.json`) |
+| `form_stats` | Server-side form-submission totals |
+| `get_call_page_views` | The visitor's page-view journey behind a call — pairs with `call_eligibility_check` for conversion debugging |
 
 ### Agency aggregation *(v0.4+)*
 
@@ -174,6 +185,28 @@ Validation is strict: phone-number format, area code (`^\d{3}$`), `pool_size` �
 | `spam_detector` *(v0.5)* | Heuristically flag likely-spam calls (short duration, unanswered, repeat-caller patterns). Optional `auto_tag=True` adds `auto_detected_spam` tag. Deliberately does NOT set `spam=True` (that would hide the call from default GETs) |
 
 All tools accept `account_id` optionally — if omitted, the first accessible account is auto-resolved. Most accept `company_id` to filter to a single client.
+
+## How this compares to CallRail's official MCP server
+
+CallRail now offers an official hosted MCP server (documented at
+[apidocs.callrail.com](https://apidocs.callrail.com/#mcp)) — OAuth 2.0,
+~30 tools, with the server URL "provided by your CallRail account team."
+It's a good option if you want a fully managed remote server.
+
+This project remains different on purpose:
+
+| | callrail-mcp (this project) | Official CallRail MCP |
+|---|---|---|
+| Install | `pip install callrail-mcp` — running in 2 minutes | URL provisioned by your CallRail account team |
+| Hosting | Local stdio (your API key never leaves your machine) | Hosted remote (OAuth) |
+| Tools | 59 | ~30 |
+| Agency tooling | `usage_summary` cost attribution, `compare_periods`, `spam_detector`, `bulk_update_calls`, `call_eligibility_check` | Not offered |
+| Safety guards | `confirm_billing` / `confirm_dialing` / `dry_run` defaults, strict input validation | — |
+| Source | MIT, open, auditable | Closed |
+
+Both speak the same underlying REST API v3. If you're an agency running
+Claude against multiple client accounts and want cost attribution and
+bulk workflows, this project is built for exactly that.
 
 ## Out of scope (deliberately not implemented)
 
