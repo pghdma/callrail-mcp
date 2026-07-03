@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-07-03
+
+### Fixed — deep-audit round 3: response-shape fuzz + property-based testing
+
+Round 2 fuzzed tool INPUTS; round 3 fuzzed what CallRail sends BACK
+(2,891 calls with structurally-valid-but-garbage-typed responses) and
+brought hypothesis property testing to invariants no prior round had
+mechanically verified.
+
+#### Response-shape hardening (182 fuzz failures, 8 roots)
+- **`paginate()` now yields only dict items.** A malformed collection
+  containing strings/ints/nulls crashed all six paginate-consuming
+  tools (`call_summary`, `usage_summary`, `compare_periods`,
+  `spam_detector`, `search_calls_by_number`, `bulk_update_calls`) with
+  raw AttributeError on `item.get()`. Non-dict items are skipped with
+  a warning.
+- **`call_eligibility_check`** — wrong-typed `utm_source`/`source`/
+  `source_name` crashed `.lower()`; now safely coerced.
+- **`search_calls_by_number`** — non-string `customer_phone_number` in
+  a call record crashed `_digits_only`; now skipped.
+
+#### Hypothesis findings (property-based, permanent in
+tests/test_properties.py)
+- **`_date_window` OverflowError — reachable in production.** A
+  valid-format ancient end_date (e.g. "0001-01-01") minus a large
+  `days` lookback lands before year 1, which `date` cannot represent —
+  `list_calls(days=36500, end_date="0001-01-01")` crashed with a raw
+  OverflowError despite the 36500-day cap. Now clamped to date.min.
+- **Money invariant now machine-verified**: per-company cost shares in
+  `usage_summary` sum to `estimated_cycle_total` exactly (cent-level)
+  across 120 randomized fleets per run.
+- Also pinned: `_safe_path` can never emit a dot-segment or unencoded
+  reserved char for ANY input; `_parse_retry_after` always lands in
+  [0, 60] and finite; `_is_toll_free` and `_date_window` are total
+  functions over garbage.
+
+### Added — tests
+- `tests/test_properties.py` — 6 hypothesis property suites.
+- 4 targeted regressions (ancient end_date, paginate non-dict skip,
+  wrong-typed eligibility fields, non-string phone field).
+- Tests 385 → 395.
+
 ## [1.1.1] - 2026-07-03
 
 ### Fixed — deep-audit round 2: all-tool adversarial fuzz

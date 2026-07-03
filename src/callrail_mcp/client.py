@@ -192,7 +192,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.1.1 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.1.2 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -449,7 +449,21 @@ class CallRailClient:
                     "stopping pagination.", path, key, type(items).__name__,
                 )
                 break
-            yield from items
+            # Yield only dict items. Every CallRail collection contains
+            # objects; a non-dict item (malformed/partial response) would
+            # crash consumers on item.get() with a raw AttributeError —
+            # uncatchable by tool bodies, which only catch CallRailError.
+            skipped = 0
+            for item in items:
+                if isinstance(item, dict):
+                    yield item
+                else:
+                    skipped += 1
+            if skipped:
+                logger.warning(
+                    "paginate(%s): skipped %d non-dict item(s) on page %d.",
+                    path, skipped, page,
+                )
             # Use total_pages when present and >0 to detect end-of-results.
             # Some endpoints omit it or report 0 — in those cases fall back
             # to "stop on empty page" (handled by the not data.get(key)
