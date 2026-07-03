@@ -3769,3 +3769,87 @@ def test_v111_clamp_helpers_coerce_garbage() -> None:
     assert _clamp_page("3") == 3  # type: ignore[arg-type]
     assert _clamp_page("") == 1  # type: ignore[arg-type]
     assert _clamp_page(-5) == 1
+
+
+# ============================================================
+# v1.1.2 round-3 deep audit: response-shape holes + hypothesis finds
+# ============================================================
+
+
+def test_v112_ancient_end_date_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hypothesis find: valid-format ancient end_date minus a large
+    days lookback lands before year 1 → OverflowError crashed the tool
+    (reachable in production despite the 36500-day cap)."""
+    from unittest.mock import MagicMock
+
+    m = MagicMock()
+    m.resolve_account_id.return_value = "ACC1"
+    m.get.return_value = {"calls": []}
+    server_mod._client = m
+    out = json.loads(server_mod.list_calls(days=36500, end_date="0001-01-01"))
+    assert "error" not in out  # clamped, not crashed
+
+
+@responses.activate
+def test_v112_paginate_skips_non_dict_items(server_with_mock_client) -> None:
+    """Non-dict items in a collection must be skipped (consumers call
+    item.get() and crashed with raw AttributeError)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": ["garbage", 42, None, {"id": "CAL1"}], "total_pages": 1},
+        status=200,
+    )
+    client = server_mod.get_client()
+    items = list(client.paginate("a/ACC1/calls.json", {}, items_key="calls"))
+    assert items == [{"id": "CAL1"}]
+
+
+@responses.activate
+def test_v112_eligibility_check_survives_wrong_typed_fields(
+    server_with_mock_client,
+) -> None:
+    """Wrong-typed source/utm fields crashed .lower() with raw
+    AttributeError."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL7.json",
+        json={"gclid": [], "utm_source": 9, "source": {}, "source_name": 4,
+              "duration": "x", "answered": "maybe"},
+        status=200,
+    )
+    out = json.loads(server_mod.call_eligibility_check(call_id="CAL7"))
+    assert out["google_ads_eligible"] is False  # graceful, not a crash
+
+
+@responses.activate
+def test_v112_search_survives_non_string_phone_field(
+    server_with_mock_client,
+) -> None:
+    """A non-string customer_phone_number in a call record crashed
+    _digits_only with raw TypeError."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [
+            {"customer_phone_number": 55},
+            {"customer_phone_number": "+14125551234"},
+        ], "total_pages": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.search_calls_by_number(phone_number="4125551234"))
+    assert out["match_count"] == 1

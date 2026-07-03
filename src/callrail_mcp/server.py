@@ -21,7 +21,7 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -142,7 +142,16 @@ def _date_window(
         else:
             end = datetime.now(tzinfo).date()
             out["end_date"] = end.isoformat()
-        out["start_date"] = (end - timedelta(days=days)).isoformat()
+        try:
+            start = end - timedelta(days=days)
+        except OverflowError:
+            # Reachable in production despite the 36500-day cap: a
+            # valid-format ancient end_date (e.g. "0001-01-01") minus a
+            # large lookback lands before year 1, which `date` cannot
+            # represent. Clamp to date.min rather than crash the tool
+            # (hypothesis finding, 2026-07 round-3 audit).
+            start = date.min
+        out["start_date"] = start.isoformat()
     return out
 
 
@@ -1372,7 +1381,8 @@ def search_calls_by_number(
         matches: list[dict[str, Any]] = []
         truncated = False
         for c in client.paginate(f"a/{aid}/calls.json", params, items_key="calls", max_pages=50):
-            num = _digits_only(c.get("customer_phone_number") or "")
+            raw_num = c.get("customer_phone_number")
+            num = _digits_only(raw_num) if isinstance(raw_num, str) else ""
             if num.endswith(digits):
                 if len(matches) >= SEARCH_MATCH_CAP:
                     truncated = True
@@ -2215,9 +2225,15 @@ def call_eligibility_check(
             return _err_msg(f"Unexpected response shape from CallRail: {type(call_data).__name__}")
 
         gclid = call_data.get("gclid")
-        utm_source = (call_data.get("utm_source") or "").lower()
-        source_slug = (call_data.get("source") or "").lower()
-        source_name = (call_data.get("source_name") or "").lower()
+
+        def _lower_str(v: Any) -> str:
+            # CallRail returns strings here, but a wrong-typed value
+            # (int/list) would crash .lower() with a raw AttributeError.
+            return v.lower() if isinstance(v, str) else ""
+
+        utm_source = _lower_str(call_data.get("utm_source"))
+        source_slug = _lower_str(call_data.get("source"))
+        source_name = _lower_str(call_data.get("source_name"))
         # Robust int coercion — CallRail returns int but defend against
         # future schema changes (string/float).
         raw_duration = call_data.get("duration") or 0
