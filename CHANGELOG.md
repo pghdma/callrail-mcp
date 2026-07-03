@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-07-03
+
+### Fixed — deep-audit round 4: mutation testing + shipped-artifact audit
+
+Round 4 turned the audit on the TEST SUITE and the PACKAGING — layers
+no code-reading or fuzzing round can reach. A 14-mutant battery
+(deliberate bugs injected into critical lines, one at a time) exposed
+two vacuous regression tests guarding changelog-advertised guarantees:
+
+- **`test_v042_post_does_NOT_retry_on_5xx` never tested its claim.**
+  The fixture builds the client with `max_retries=0` — NOTHING retries
+  in that configuration, so the test passed even with POST added to
+  the idempotent-retry set. The CRITICAL double-write guard from
+  v0.4.2 (duplicate $3/mo trackers) had zero effective coverage. Now
+  runs with retries enabled.
+- **`test_v050_compare_periods_no_overlap` asserted on its own local
+  re-implementation** of the window arithmetic — it never called
+  `compare_periods`, so the v0.5.0 double-count fix could regress
+  without any test failing. Rewritten end-to-end against the window
+  boundaries the tool actually returns.
+- **36500-day cap had no boundary coverage** — a mutant raising the
+  cap 1000× survived (the existing test used 10**18, which any large
+  cap rejects). Added days=36500/36501 boundary test.
+- 1 equivalent mutant identified and documented (paginate total_pages
+  min-clamp is shadowed by the while-loop bound — differs only in
+  warning emission). Final score: 13/13 non-equivalent mutants killed.
+
+### Fixed — packaging
+- **`py.typed` was missing from the wheel** (PEP 561). The project
+  ships mypy-strict annotations and documents library usage, but
+  without the marker downstream type checkers ignore ALL annotations.
+  Added marker + package-data config; verified present in the built
+  wheel.
+
+### Documentation
+- Docstring Args drift fixed on `update_user` (5 params undocumented),
+  `get_text_message`, `get_webhook` (account_id undocumented) — found
+  by a mechanical docstring-vs-signature sweep across all 59 tools.
+
+### Verified
+- Shipped PyPI artifact (1.1.2) smoke-tested in a clean venv on
+  Python 3.14: installs, imports, registers all 59 tools.
+- Tests 395 → 396.
+
 ## [1.1.2] - 2026-07-03
 
 ### Fixed — deep-audit round 3: response-shape fuzz + property-based testing
