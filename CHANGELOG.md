@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (fresh-eyes audit — 5 bugs, 1 HIGH)
+
+#### HIGH
+- **`_date_window` silently discarded an explicit `end_date`** when no
+  `start_date` was given. `list_calls(end_date="2026-06-01")` returned
+  the window ending TODAY — the caller's end_date was overwritten by the
+  `days`-lookback branch, violating the documented "explicit dates
+  always win" contract. Wrong data, no error. Affected `list_calls`,
+  `call_summary`, `list_form_submissions`, `list_text_messages`,
+  `usage_summary`. Now the days-lookback anchors to the caller's
+  end_date (`end_date - days`) instead of overwriting it.
+
+#### MEDIUM
+- **`bulk_update_calls(days="7", ...)` raised an uncaught `TypeError`**
+  (str < int) in the at-least-one-filter check, which runs BEFORE
+  `_validate_window`'s coercion. Loose-JSON MCP clients sending string
+  days crashed the tool reply instead of getting an error envelope —
+  the same bug class fixed in v0.4.7 (`_date_window`) and v0.5.3
+  (`spam_detector` cap), missed in this one remaining raw comparison.
+- **`compare_periods(days="30")` spuriously rejected a valid value**
+  with the misleading message "days=30 exceeds compare_periods cap of
+  365". The `isinstance(days, int)` guard rejected coercible strings
+  outright. Now coerces first; the 365 cap still holds for string
+  input (`days="400"` still rejected).
+
+#### LOW
+- **`client.paginate()` leaked a raw `TypeError` through the generator**
+  if a malformed response carried a non-int `total_pages` (e.g. `"5"`).
+  Tool bodies only catch `CallRailError`, so this would have crashed the
+  MCP reply. Now coerced defensively; uncoercible values fall back to
+  stop-on-empty-page.
+- **`create_tag` had zero input validation** — the only write tool with
+  none. `create_tag(name="", company_id="")` burned the account-resolve
+  API call before failing server-side. Now: non-empty name (255-char
+  cap), non-empty company_id with 'COM' prefix shape check.
+
+### Added
+- **`list_companies(page=...)`** — agencies with more than `per_page`
+  companies previously had no way to reach page 2 through this tool
+  (every sibling list tool already had `page`).
+
+### Documentation
+- **`update_notification` docstring listed alert_type values that don't
+  exist** ('call_completed', 'call_missed', 'first_time_caller', ...) —
+  contradicting `VALID_NOTIFICATION_ALERT_TYPES`. Following the docstring
+  triggered spurious "not in known set" warnings. Now lists the real
+  known set (same as `create_notification`).
+
+### Added — tests
+- 9 new regression tests (297 → 306): end_date anchoring (+ no-dates
+  regression guard), string-days on bulk_update_calls / compare_periods
+  (accept + cap-hold), paginate total_pages coercion (+ garbage
+  fallback), create_tag validation matrix, list_companies page param.
+
 ## [1.0.3] - 2026-04-25
 
 ### Security

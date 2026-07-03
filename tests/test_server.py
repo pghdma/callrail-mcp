@@ -3286,3 +3286,154 @@ def test_call_eligibility_check_custom_threshold(server_with_mock_client) -> Non
     )
     assert out["google_ads_eligible"] is True
     assert out["threshold_used"] == 15
+
+
+# ============================================================
+# v1.0.5 fresh-eyes audit regression tests
+# ============================================================
+
+
+def test_v105_date_window_honors_explicit_end_date() -> None:
+    """F48: explicit end_date must anchor the days-lookback, not be
+    silently overwritten with today ("explicit dates always win")."""
+    from callrail_mcp.server import _date_window
+
+    out = _date_window(7, None, "2026-06-01")
+    assert out["end_date"] == "2026-06-01"
+    assert out["start_date"] == "2026-05-25"  # 2026-06-01 minus 7 days
+
+
+def test_v105_date_window_no_dates_unchanged() -> None:
+    """Regression guard: the no-explicit-dates path still ends today."""
+    from datetime import datetime, timezone
+
+    from callrail_mcp.server import _date_window
+
+    out = _date_window(7, None, None)
+    assert out["end_date"] == datetime.now(timezone.utc).date().isoformat()
+
+
+def test_v105_bulk_update_string_days_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F5: days="7" (loose-JSON MCP client) previously raised an uncaught
+    TypeError in the filter check (str < int) before validation ran."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    # No URL stubs registered → any network attempt raises ConnectionError,
+    # but the pre-network filter/validation must NOT raise TypeError.
+    out = json.loads(server_mod.bulk_update_calls(days="0", set_note="x"))  # type: ignore[arg-type]
+    assert out["error"] is True
+    assert "filter" in out["message"]
+
+
+@responses.activate
+def test_v105_compare_periods_accepts_string_days(
+    server_with_mock_client,
+) -> None:
+    """F18: days="30" was spuriously rejected with a misleading
+    'exceeds cap of 365' message. After coercion it must proceed."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [], "total_pages": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.compare_periods(days="30"))  # type: ignore[arg-type]
+    assert "error" not in out
+    assert out["window_days"] == 30
+
+
+def test_v105_compare_periods_string_days_over_cap_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 365 cap must hold for string input too (no coercion bypass)."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.compare_periods(days="400"))  # type: ignore[arg-type]
+    assert out["error"] is True
+    assert "365" in out["message"]
+
+
+@responses.activate
+def test_v105_paginate_coerces_string_total_pages(
+    server_with_mock_client,
+) -> None:
+    """F1: a malformed string total_pages ("1") must not raise TypeError
+    through the generator — coerce or fall back to stop-on-empty-page."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"id": "CAL1"}], "total_pages": "1"},
+        status=200,
+    )
+    client = server_mod.get_client()
+    items = list(client.paginate("a/ACC1/calls.json", {}, items_key="calls"))
+    assert len(items) == 1
+
+
+@responses.activate
+def test_v105_paginate_garbage_total_pages_falls_back(
+    server_with_mock_client,
+) -> None:
+    """Uncoercible total_pages is treated as missing (stop on empty page)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"id": "CAL1"}], "total_pages": "garbage"},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [], "total_pages": "garbage"},
+        status=200,
+    )
+    client = server_mod.get_client()
+    items = list(client.paginate("a/ACC1/calls.json", {}, items_key="calls"))
+    assert len(items) == 1
+
+
+def test_v105_create_tag_rejects_empty_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F12: create_tag was the only write tool with zero input validation —
+    empty name/company_id burned an API call before failing server-side."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.create_tag(name="", company_id="COM1"))
+    assert out["error"] is True and "name" in out["message"]
+    out = json.loads(server_mod.create_tag(name="vip", company_id=""))
+    assert out["error"] is True and "company_id" in out["message"]
+    out = json.loads(server_mod.create_tag(name="vip", company_id="not-com-prefixed"))
+    assert out["error"] is True and "COM" in out["message"]
+    out = json.loads(server_mod.create_tag(name="x" * 300, company_id="COM1"))
+    assert out["error"] is True and "length" in out["message"]
+
+
+@responses.activate
+def test_v105_list_companies_page_param(server_with_mock_client) -> None:
+    """F28: agencies with >per_page companies previously had no way to
+    fetch page 2 through this tool."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [{"id": "COM_page2"}], "page": 2},
+        status=200,
+    )
+    out = json.loads(server_mod.list_companies(page=2))
+    assert out["companies"][0]["id"] == "COM_page2"
+    # Assert the page param actually reached the wire.
+    assert "page=2" in responses.calls[-1].request.url

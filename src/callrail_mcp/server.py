@@ -123,10 +123,24 @@ def _date_window(
         except Exception:
             # Bad tz string → fall back to UTC rather than crash.
             tzinfo = timezone.utc
-        end = datetime.now(tzinfo).date()
-        start = end - timedelta(days=days)
-        out["start_date"] = start.isoformat()
-        out["end_date"] = end.isoformat()
+        if "end_date" in out:
+            # Explicit end_date wins (docstring contract: "Explicit dates
+            # always win over `days`"). Anchor the days-lookback to the
+            # caller's end_date instead of silently overwriting it with
+            # today — previously `list_calls(end_date="2026-06-01")`
+            # returned the window ending TODAY, ignoring the caller's
+            # end_date entirely (wrong data, no error).
+            try:
+                end = datetime.strptime(out["end_date"], "%Y-%m-%d").date()
+            except ValueError:
+                # Defensive: all tool callers run _validate_window first,
+                # so this should be unreachable. Fall back to today.
+                end = datetime.now(tzinfo).date()
+                out["end_date"] = end.isoformat()
+        else:
+            end = datetime.now(tzinfo).date()
+            out["end_date"] = end.isoformat()
+        out["start_date"] = (end - timedelta(days=days)).isoformat()
     return out
 
 
@@ -500,6 +514,7 @@ def list_companies(
     account_id: str | None = None,
     per_page: int = 250,
     status: str | None = None,
+    page: int = 1,
 ) -> str:
     """List companies (client businesses) under a CallRail account.
 
@@ -508,10 +523,13 @@ def list_companies(
         per_page: Page size (max 250).
         status: Filter by status. Defaults to None (returns all). Common values:
             'active' (excludes disabled/soft-deleted), 'disabled'.
+        page: 1-indexed. Agencies with more than `per_page` companies
+            need this to reach the rest — previously there was no way
+            to fetch page 2 via this tool.
     """
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
         if status:
             params["status"] = status
         return _ok(client.get(f"a/{aid}/companies.json", params))
@@ -1563,6 +1581,21 @@ def create_tag(
             'blue1', 'purple1', 'pink1', 'gray1', 'gray2'.
             If omitted, CallRail defaults to 'gray1'.
     """
+    # Fail fast pre-network (project convention: validate before burning
+    # the resolve_account_id call). Previously create_tag('' , '') went
+    # straight to the network — the only write tool with no input checks.
+    ok, msg = _require_non_empty(name, "name")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
+    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    if not ok:
+        return _err_msg(msg)
     if color is not None and color not in VALID_TAG_COLORS:
         return _err_msg(
             f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
@@ -2197,15 +2230,23 @@ def compare_periods(
     ok, msg = _validate_window(days, None, None, require_window=True)
     if not ok:
         return _err_msg(msg)
-    if not isinstance(days, int) or days > 365:
-        # `_validate_window` already coerced strings/floats to int and
-        # checked >=1 + <=36500. We only need to enforce the tighter
-        # 365 cap that's specific to compare_periods (year-over-year is
-        # the largest meaningful window for delta analysis).
+    # Coerce BEFORE the cap check. `_validate_window` coerces internally
+    # but only returns (ok, msg) — the previous `isinstance(days, int)`
+    # guard rejected a perfectly valid days="30" from loose-JSON MCP
+    # clients with the misleading message "exceeds cap of 365".
+    days_int = _coerce_days_int(days)
+    if days_int is None or days_int < 1:
+        # Defensive: _validate_window(require_window=True) guarantees a
+        # positive coercible value, so this should be unreachable.
+        return _err_msg(f"days={days!r} is not a valid positive integer.")
+    if days_int > 365:
+        # Enforce the tighter 365 cap that's specific to compare_periods
+        # (year-over-year is the largest meaningful delta window).
         return _err_msg(
-            f"days={days} exceeds compare_periods cap of 365 (one year). "
+            f"days={days_int} exceeds compare_periods cap of 365 (one year). "
             f"For longer windows, use usage_summary on each period separately."
         )
+    days = days_int  # use the coerced int for timedelta math below
     try:
         aid = client.resolve_account_id(account_id)
         companies = list(
@@ -2414,7 +2455,12 @@ def bulk_update_calls(
     extra GET.
     """
     # Require at least one filter to avoid "update every call ever".
-    if not company_id and not source and not answered and (days is None or days < 1):
+    # Coerce `days` BEFORE the < comparison — a loose-JSON MCP client
+    # sending days="7" previously raised an uncaught TypeError here
+    # (str < int), crashing the tool reply. Same bug class as the
+    # v0.4.7 _date_window and v0.5.3 spam_detector cap fixes.
+    days_int = _coerce_days_int(days)
+    if not company_id and not source and not answered and (days_int is None or days_int < 1):
         return _err_msg(
             "bulk_update_calls requires at least one filter "
             "(company_id, source, answered, or days>=1) to avoid "
@@ -3679,9 +3725,11 @@ def update_notification(
     Args:
         notification_id: Notification rule ID.
         name: Display name for the rule.
-        alert_type: One of: 'call_completed', 'call_missed',
-            'first_time_caller', 'voicemail', 'form_submission'.
-            Plan-specific — unknown values warn but do not reject.
+        alert_type: Common values: 'all_calls', 'first_time_callers',
+            'missed_calls', 'voicemails', 'all_texts',
+            'first_time_texters', 'all_form_submissions' (same set as
+            `create_notification`). Plan-specific — unknown values warn
+            but do not reject.
         send_email: Send email notification.
         send_desktop: Send desktop browser push.
         send_push: Send mobile push notification.

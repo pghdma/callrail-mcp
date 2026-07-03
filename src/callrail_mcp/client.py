@@ -436,6 +436,16 @@ class CallRailClient:
             # `data.get("total_pages", 1)` which silently truncated to
             # page 1 whenever total_pages was missing.
             total_pages = data.get("total_pages")
+            # Defensive coercion: a malformed response with a string
+            # total_pages ("5") would raise TypeError in the min()
+            # comparison below, leaking a raw exception through the
+            # generator into tool bodies (which only catch CallRailError).
+            # Treat uncoercible values as missing → stop-on-empty-page.
+            if total_pages is not None and not isinstance(total_pages, int):
+                try:
+                    total_pages = int(total_pages)
+                except (TypeError, ValueError):
+                    total_pages = None
             # Defensive: don't trust server-reported total_pages above
             # max_pages. A misbehaving / misconfigured server returning
             # `total_pages: 999999` shouldn't pin the iterator against the
