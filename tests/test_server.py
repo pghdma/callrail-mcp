@@ -3659,3 +3659,113 @@ def test_v110_transcript_404_carries_premium_ci_hint(
     assert out["error"] is True
     assert out["status"] == 404
     assert "Premium Conversation Intelligence" in out["hint"]
+
+
+# ============================================================
+# v1.1.1 deep-audit targeted regressions (response-shape holes +
+# NaN wire-safety + docstring-promised coercions)
+# ============================================================
+
+
+@responses.activate
+def test_v111_paginate_string_items_stops_cleanly(server_with_mock_client) -> None:
+    """A string where the items array belongs must NOT be yielded as
+    single characters (consumers crash on 'str'.get())."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": "oops-not-a-list", "total_pages": 5},
+        status=200,
+    )
+    client = server_mod.get_client()
+    items = list(client.paginate("a/ACC1/calls.json", {}, items_key="calls"))
+    assert items == []
+
+
+@responses.activate
+def test_v111_resolve_account_id_rejects_dict_accounts(
+    server_with_mock_client,
+) -> None:
+    """accounts as a dict previously raised raw KeyError(0) — must be a
+    CallRailError so tool bodies catch it."""
+    from callrail_mcp.client import CallRailError
+
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": {"id": "ACC1"}},
+        status=200,
+    )
+    client = server_mod.get_client()
+    with pytest.raises(CallRailError, match="expected list"):
+        client.resolve_account_id()
+
+
+def test_v111_nan_value_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NaN/Infinity serialize as invalid JSON tokens (json.dumps
+    allow_nan default) — must be rejected pre-network on all three
+    tools with a float `value` param."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        out = json.loads(server_mod.update_form_submission(
+            submission_id="FOR1", value=bad))
+        assert out["error"] is True and "finite" in out["message"]
+        out = json.loads(server_mod.update_sms_thread(thread_id="THR1", value=bad))
+        assert out["error"] is True and "finite" in out["message"]
+        out = json.loads(server_mod.create_form_submission(
+            company_id="COM1", referrer="(direct)",
+            referring_url="https://x", landing_page_url="https://y",
+            value=bad))
+        assert out["error"] is True and "finite" in out["message"]
+
+
+@responses.activate
+def test_v111_tag_id_accepts_numeric_form(server_with_mock_client) -> None:
+    """delete_tag's docstring has always promised 'accepts string or
+    numeric forms' — an int tag_id previously crashed with TypeError."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        "https://api.callrail.com/v3/a/ACC1/tags/812.json",
+        status=204,
+    )
+    out = json.loads(server_mod.delete_tag(tag_id=812))  # type: ignore[arg-type]
+    assert out["deleted"] is True and out["tag_id"] == "812"
+
+
+@responses.activate
+def test_v111_search_accepts_json_number_phone(server_with_mock_client) -> None:
+    """A phone number arriving as a JSON number (int) is coerced, not
+    crashed on (previously raw TypeError from _digits_only)."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [], "total_pages": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.search_calls_by_number(phone_number=4125551234))  # type: ignore[arg-type]
+    assert out["match_count"] == 0
+
+
+def test_v111_clamp_helpers_coerce_garbage() -> None:
+    from callrail_mcp.server import _clamp_page, _clamp_per_page
+
+    assert _clamp_per_page("250") == 250  # type: ignore[arg-type]
+    assert _clamp_per_page("") == 1  # type: ignore[arg-type]
+    assert _clamp_per_page(None) == 1  # type: ignore[arg-type]
+    assert _clamp_per_page(9999) == 250
+    assert _clamp_page("3") == 3  # type: ignore[arg-type]
+    assert _clamp_page("") == 1  # type: ignore[arg-type]
+    assert _clamp_page(-5) == 1

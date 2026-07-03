@@ -71,6 +71,8 @@ def _validate_date(value: str, field_name: str) -> tuple[bool, str]:
     """Return (is_valid, error_message). Empty string is treated as not provided."""
     if not value:
         return True, ""
+    if not isinstance(value, str):
+        return False, f"{field_name} must be a 'YYYY-MM-DD' string (got {type(value).__name__})."
     if not _DATE_RE.match(value):
         return False, f"{field_name}={value!r} is not a valid YYYY-MM-DD date."
     try:
@@ -330,10 +332,26 @@ def _validate_window(
 
 
 def _clamp_per_page(per_page: int) -> int:
-    """Clamp per_page to [1, MAX_PER_PAGE]. Silently corrects nonsense input."""
-    if per_page is None or per_page < 1:
+    """Clamp per_page to [1, MAX_PER_PAGE]. Silently corrects nonsense input
+    (including non-int types — "" / "250" / None previously raised raw
+    TypeError from the < comparison; 2026-07 all-tool fuzz finding)."""
+    try:
+        pp = int(per_page)
+    except (TypeError, ValueError):
         return 1
-    return min(per_page, MAX_PER_PAGE)
+    if pp < 1:
+        return 1
+    return min(pp, MAX_PER_PAGE)
+
+
+def _clamp_page(page: int) -> int:
+    """Clamp page to >= 1, coercing non-int garbage to 1. The previous
+    inline `max(1, page)` raised raw TypeError on string/None pages."""
+    try:
+        pg = int(page)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, pg)
 
 
 def _ok(data: Any) -> str:
@@ -396,9 +414,18 @@ _BANNED_UNICODE_CATEGORIES: frozenset[str] = frozenset({"Cf", "Cc", "Cs", "Mn"})
 
 
 def _require_non_empty(value: str | None, field_name: str) -> tuple[bool, str]:
-    """True only if value is a non-empty, non-whitespace string."""
-    if value is None or not str(value).strip():
+    """True only if value is a non-empty, non-whitespace string.
+
+    Rejects non-string types outright (2026-07 all-tool fuzz finding:
+    loose-JSON clients sending ints/lists/bytes for string fields
+    previously crashed downstream validators with raw TypeError /
+    AttributeError instead of returning an error envelope)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
         return False, f"{field_name} is required and cannot be empty."
+    if not isinstance(value, str):
+        return False, (
+            f"{field_name} must be a string (got {type(value).__name__})."
+        )
     return True, ""
 
 
@@ -420,6 +447,8 @@ def _validate_id_shape(
       diacritics. These can hide spoofed IDs in display contexts.
     - Optional: must start with the given prefix ('TRK', 'COM', etc.).
     """
+    if not isinstance(value, str):
+        return False, f"{field_name} must be a string (got {type(value).__name__})."
     if "/" in value:
         return False, (
             f"{field_name}={value!r} may not contain '/'. "
@@ -450,6 +479,8 @@ def _validate_id_shape(
 
 def _validate_phone(value: str, field_name: str) -> tuple[bool, str]:
     """Loose E.164-ish phone check. Avoids burning an API call on obvious garbage."""
+    if not isinstance(value, str):
+        return False, f"{field_name} must be a string (got {type(value).__name__})."
     if not _PHONE_RE.match(value.strip()):
         return False, (
             f"{field_name}={value!r} doesn't look like a phone number "
@@ -459,6 +490,8 @@ def _validate_phone(value: str, field_name: str) -> tuple[bool, str]:
 
 
 def _validate_area_code(value: str) -> tuple[bool, str]:
+    if not isinstance(value, str):
+        return False, f"area_code must be a string (got {type(value).__name__})."
     if not _AREA_CODE_RE.match(value):
         return False, f"area_code={value!r} must be exactly 3 digits (e.g. '412')."
     return True, ""
@@ -467,6 +500,8 @@ def _validate_area_code(value: str) -> tuple[bool, str]:
 def _validate_pool_size(value: int) -> tuple[bool, str]:
     """Pool size sanity. CallRail prices each pool number, so cap aggressively
     to prevent accidental 5-figure provisioning bills."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False, f"pool_size must be an integer (got {type(value).__name__})."
     if value < 1:
         return False, f"pool_size={value} must be >= 1."
     if value > 50:
@@ -478,8 +513,22 @@ def _validate_pool_size(value: int) -> tuple[bool, str]:
 
 
 def _validate_length(value: str, field_name: str, max_len: int) -> tuple[bool, str]:
+    if not isinstance(value, str):
+        return False, f"{field_name} must be a string (got {type(value).__name__})."
     if len(value) > max_len:
         return False, f"{field_name} length {len(value)} exceeds max {max_len}."
+    return True, ""
+
+
+def _validate_finite(value: float, field_name: str) -> tuple[bool, str]:
+    """Reject NaN/Infinity in numeric fields. json.dumps serializes them
+    as bare NaN/Infinity tokens (allow_nan=True default) — which is NOT
+    valid JSON — so they'd reach CallRail as a malformed request body."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False, f"{field_name} must be a number (got {type(value).__name__})."
+    import math
+    if not math.isfinite(value):
+        return False, f"{field_name}={value!r} must be a finite number."
     return True, ""
 
 
@@ -529,7 +578,7 @@ def list_companies(
     """
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if status:
             params["status"] = status
         return _ok(client.get(f"a/{aid}/companies.json", params))
@@ -589,7 +638,7 @@ def list_trackers(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if company_id:
             params["company_id"] = company_id
         if status:
@@ -942,7 +991,7 @@ def list_calls(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -1098,7 +1147,7 @@ def list_form_submissions(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -1146,7 +1195,7 @@ def list_text_messages(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
@@ -1282,6 +1331,16 @@ def search_calls_by_number(
         company_id: Optional company filter.
         days: Lookback window (default 90).
     """
+    # A phone number arriving as a JSON number (int) is plausible from
+    # loose MCP clients — coerce rather than crash. Anything else
+    # non-string is rejected with an envelope (fuzz finding: int/bytes
+    # previously raised raw TypeError from _digits_only / .isdigit).
+    if isinstance(phone_number, int) and not isinstance(phone_number, bool):
+        phone_number = str(phone_number)
+    if phone_number is not None and not isinstance(phone_number, str):
+        return _err_msg(
+            f"phone_number must be a string (got {type(phone_number).__name__})."
+        )
     digits = _digits_only(phone_number or "")
     if len(digits) < 7:
         return _err_msg(
@@ -1392,6 +1451,8 @@ def update_call(
         ok, msg = _validate_length(customer_name, "customer_name", _MAX_CUSTOMER_NAME_LEN)
         if not ok:
             return _err_msg(msg)
+    if tags is not None and not isinstance(tags, list):
+        return _err_msg(f"tags must be a list of strings (got {type(tags).__name__}).")
     if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
         return _err_msg(
             f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
@@ -1424,6 +1485,12 @@ def _clean_tag_list(tags: list[str] | None) -> list[str]:
     only one tag was added).
     """
     if not tags:
+        return []
+    if not isinstance(tags, list):
+        logger.warning(
+            "_clean_tag_list received non-list %s — returning []. "
+            "tags must be a list of strings.", type(tags).__name__,
+        )
         return []
     seen: dict[str, None] = {}
     dropped_non_strings = 0
@@ -1551,10 +1618,16 @@ def update_form_submission(
         ok, msg = _validate_length(note, "note", _MAX_NOTE_LEN)
         if not ok:
             return _err_msg(msg)
+    if tags is not None and not isinstance(tags, list):
+        return _err_msg(f"tags must be a list of strings (got {type(tags).__name__}).")
     if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
         return _err_msg(
             f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
         )
+    if value is not None:
+        ok, msg = _validate_finite(value, "value")
+        if not ok:
+            return _err_msg(msg)
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -1587,7 +1660,7 @@ def list_tags(
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
             "per_page": _clamp_per_page(per_page),
-            "page": max(1, page),
+            "page": _clamp_page(page),
         }
         if company_id:
             params["company_id"] = company_id
@@ -1660,6 +1733,11 @@ def update_tag(
             VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
             pink1-4, red1-2, orange1-4, yellow1-2, green1-4.
     """
+    # Docstring contract: numeric tag_id forms are accepted (CallRail
+    # tag IDs are integers). Coerce int -> str; bool excluded (True is
+    # an int subclass but str(True)="True" is never a valid tag id).
+    if isinstance(tag_id, int) and not isinstance(tag_id, bool):
+        tag_id = str(tag_id)
     ok, msg = _require_non_empty(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
@@ -1709,6 +1787,11 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
     Returns:
         JSON string `{"deleted": True, "tag_id": ...}` on success.
     """
+    # Docstring contract: numeric tag_id forms are accepted (CallRail
+    # tag IDs are integers). Coerce int -> str; bool excluded (True is
+    # an int subclass but str(True)="True" is never a valid tag id).
+    if isinstance(tag_id, int) and not isinstance(tag_id, bool):
+        tag_id = str(tag_id)
     ok, msg = _require_non_empty(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
@@ -2102,11 +2185,16 @@ def call_eligibility_check(
     ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
     if not ok:
         return _err_msg(msg)
-    if google_ads_min_duration_seconds < 0:
+    # Coerce before comparing — loose-JSON clients sending "60"/None
+    # previously raised raw TypeError from the < comparison.
+    threshold = _coerce_days_int(google_ads_min_duration_seconds)
+    if threshold is None or threshold < 0:
         return _err_msg(
-            f"google_ads_min_duration_seconds={google_ads_min_duration_seconds} "
-            f"must be non-negative."
+            f"google_ads_min_duration_seconds="
+            f"{google_ads_min_duration_seconds!r} must be a non-negative "
+            f"integer."
         )
+    google_ads_min_duration_seconds = threshold
     try:
         aid = client.resolve_account_id(account_id)
         call_data = client.get(
@@ -2877,6 +2965,8 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _validate_email(value: str, field_name: str = "email") -> tuple[bool, str]:
+    if not isinstance(value, str):
+        return False, f"{field_name} must be a string (got {type(value).__name__})."
     if not _EMAIL_RE.match(value):
         return False, f"{field_name}={value!r} doesn't look like a valid email."
     return True, ""
@@ -3369,7 +3459,7 @@ def list_webhooks(
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
             "per_page": _clamp_per_page(per_page),
-            "page": max(1, page),
+            "page": _clamp_page(page),
         }
         if company_id:
             params["company_id"] = company_id
@@ -3430,6 +3520,11 @@ def get_tag(tag_id: str, account_id: str | None = None) -> str:
         tag_id: Numeric tag id.
         account_id: Auto-resolves if omitted.
     """
+    # Docstring contract: numeric tag_id forms are accepted (CallRail
+    # tag IDs are integers). Coerce int -> str; bool excluded (True is
+    # an int subclass but str(True)="True" is never a valid tag id).
+    if isinstance(tag_id, int) and not isinstance(tag_id, bool):
+        tag_id = str(tag_id)
     ok, msg = _require_non_empty(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
@@ -3470,7 +3565,7 @@ def list_integrations(
         params = {
             "company_id": company_id,
             "per_page": _clamp_per_page(per_page),
-            "page": max(1, page),
+            "page": _clamp_page(page),
         }
         return _ok(client.get(f"a/{aid}/integrations.json", params))
     except CallRailError as e:
@@ -3562,10 +3657,16 @@ def create_form_submission(
         ok, msg = _validate_phone(customer_phone_number, "customer_phone_number")
         if not ok:
             return _err_msg(msg)
+    if tags is not None and not isinstance(tags, list):
+        return _err_msg(f"tags must be a list of strings (got {type(tags).__name__}).")
     if tags is not None and len(tags) > _MAX_TAGS_PER_REQUEST:
         return _err_msg(
             f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
         )
+    if value is not None:
+        ok, msg = _validate_finite(value, "value")
+        if not ok:
+            return _err_msg(msg)
 
     body: dict[str, Any] = {
         "company_id": company_id,
@@ -3887,7 +3988,7 @@ def list_notifications(
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
             "per_page": _clamp_per_page(per_page),
-            "page": max(1, page),
+            "page": _clamp_page(page),
         }
         if company_id:
             params["company_id"] = company_id
@@ -3938,7 +4039,7 @@ def list_leads(
     """
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if company_id:
             params["company_id"] = company_id
         return _ok(client.get(f"a/{aid}/leads.json", params))
@@ -3978,7 +4079,7 @@ def get_lead_timeline(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         return _ok(client.get(f"a/{aid}/leads/{lead_id}/timeline.json", params))
     except CallRailError as e:
         return _err(e)
@@ -4010,7 +4111,7 @@ def list_sms_threads(
     """
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if company_id:
             params["company_id"] = company_id
         return _ok(client.get(f"a/{aid}/sms-threads.json", params))
@@ -4099,6 +4200,10 @@ def update_sms_thread(
                 f"tags list length {len(cleaned)} exceeds max {_MAX_TAGS_PER_REQUEST}."
             )
         tags = cleaned
+    if value is not None:
+        ok, msg = _validate_finite(value, "value")
+        if not ok:
+            return _err_msg(msg)
     body: dict[str, Any] = {}
     if notes is not None:
         body["notes"] = notes
@@ -4273,7 +4378,7 @@ def get_call_page_views(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": max(1, page)}
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         return _ok(client.get(f"a/{aid}/calls/{call_id}/page_views.json", params))
     except CallRailError as e:
         return _err(e)
