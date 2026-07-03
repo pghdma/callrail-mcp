@@ -56,3 +56,4 @@ dmypy.json
 .env
 *.api-key
 callrail-api-key.txt
+mcp-publisher
