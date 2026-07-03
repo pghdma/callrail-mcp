@@ -1204,11 +1204,18 @@ def test_v042_parse_retry_after_floors_negative() -> None:
 
 
 @responses.activate
-def test_v042_post_does_NOT_retry_on_5xx(server_with_mock_client) -> None:
+def test_v042_post_does_NOT_retry_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     """v0.4.2 CRITICAL fix: POST retries could create duplicate trackers
-    ($3/mo each). Now POST fails fast on 5xx instead of retrying."""
-    # Single 502 — pre-fix this would have been retried 3x, potentially
-    # creating 3 trackers if CallRail processed each retry.
+    ($3/mo each). Now POST fails fast on 5xx instead of retrying.
+
+    NOTE (v1.1.3 mutation-testing find): this test previously used the
+    max_retries=0 fixture, which disables ALL retries — so it passed
+    even with POST added to the idempotent-retry set (vacuous). It must
+    run with retries ENABLED to prove POST specifically is excluded."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=2)
+    # Single 502 — pre-fix this would have been retried, potentially
+    # creating multiple trackers if CallRail processed each retry.
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a.json",
@@ -2474,23 +2481,36 @@ def test_v051_spam_detector_caps_likely_spam(server_with_mock_client) -> None:
 
 
 def test_v050_compare_periods_no_overlap() -> None:
-    """v0.5.0 audit fix: prev_end was the same day as cur_start, double-counting."""
-    # Can't easily unit-test date arithmetic without mocking datetime.now,
-    # but we can at least verify the helpers produce non-overlapping windows
-    # in principle via a direct check.
+    """v0.5.0 audit fix: prev_end was the same day as cur_start, double-counting.
+
+    v1.1.3 rewrite (mutation-testing find): the original test
+    re-implemented the window arithmetic locally and asserted on its own
+    copy — it never called compare_periods, so a regression in the real
+    code could never fail it. Now asserts on the ACTUAL window
+    boundaries the tool returns.
+    """
     from datetime import date, timedelta
-    today = date(2026, 4, 24)
-    days = 30
-    cur_end = today
-    cur_start = today - timedelta(days=days)
-    prev_end = cur_start - timedelta(days=1)  # the fix
-    prev_start = prev_end - timedelta(days=days)
-    # Windows must be disjoint.
-    assert prev_end < cur_start, f"prev_end={prev_end} overlaps cur_start={cur_start}"
-    # Both windows cover `days+1` calendar days (inclusive on both ends
-    # is CallRail's semantics).
-    assert (cur_end - cur_start).days == days
-    assert (prev_end - prev_start).days == days
+    from unittest.mock import MagicMock
+
+    m = MagicMock()
+    m.resolve_account_id.return_value = "ACC1"
+    m.paginate.side_effect = lambda path, *a, **k: iter(
+        [{"id": "COM1", "name": "Co", "status": "active",
+          "time_zone": "UTC"}] if "companies" in path else []
+    )
+    server_mod._client = m
+    out = json.loads(server_mod.compare_periods(days=30))
+    assert "error" not in out, out
+    cur_start = date.fromisoformat(out["current"]["start_date"])
+    cur_end = date.fromisoformat(out["current"]["end_date"])
+    prev_start = date.fromisoformat(out["previous"]["start_date"])
+    prev_end = date.fromisoformat(out["previous"]["end_date"])
+    # Windows must be disjoint: previous ends the day BEFORE current starts.
+    assert prev_end == cur_start - timedelta(days=1), (
+        f"windows overlap: prev_end={prev_end}, cur_start={cur_start}"
+    )
+    # Both windows equally long (inclusive-boundary semantics).
+    assert (cur_end - cur_start) == (prev_end - prev_start)
 
 
 def test_v050_date_window_uses_timezone() -> None:
@@ -3853,3 +3873,19 @@ def test_v112_search_survives_non_string_phone_field(
     )
     out = json.loads(server_mod.search_calls_by_number(phone_number="4125551234"))
     assert out["match_count"] == 1
+
+
+def test_v113_days_cap_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation-testing find: the 36500-day cap had no boundary test —
+    a mutant raising the cap 1000x survived (existing test used 10**18,
+    which passes any large cap)."""
+    from unittest.mock import MagicMock
+
+    m = MagicMock()
+    m.resolve_account_id.return_value = "ACC1"
+    m.get.return_value = {"calls": []}
+    server_mod._client = m
+    out = json.loads(server_mod.list_calls(days=36501))
+    assert out["error"] is True and "36500" in out["message"]
+    out = json.loads(server_mod.list_calls(days=36500))
+    assert "error" not in out
