@@ -16,6 +16,7 @@ Run standalone for stdio transport:
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ import re
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
+
 
 # MCP Python SDK 2.0 (released 2026-07-28) renamed FastMCP to MCPServer and
 # replaced `mcp.server.fastmcp` with a stub that raises on import. The surface
@@ -36,8 +40,6 @@ from typing import Any
 # path of a try/except it cannot evaluate.
 def _load_mcp_server_class() -> Any:
     """Return the server class for whichever MCP SDK major is installed."""
-    import importlib
-
     for module_name, attr in (
         ("mcp.server.fastmcp", "FastMCP"),      # mcp 1.x
         ("mcp.server.mcpserver", "MCPServer"),  # mcp 2.x
@@ -54,7 +56,6 @@ def _load_mcp_server_class() -> Any:
         "`pip install 'mcp>=1.23.0'` (both 1.x and 2.x are supported)."
     )
 
-from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
 
 # Library hygiene: do NOT call logging.basicConfig here — that mutates the
 # host application's global logging config. Just request a logger; users
