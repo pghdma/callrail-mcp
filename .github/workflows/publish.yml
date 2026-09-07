@@ -135,37 +135,39 @@ jobs:
       - name: Log in with GitHub OIDC
         run: ./mcp-publisher login github-oidc --registry "$REGISTRY_URL"
 
-      - name: Publish server.json
+      - name: Publish server.json and confirm the registry lists it
         run: |
           set -euo pipefail
           version="$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')"
-          echo "publishing io.github.pghdma/callrail-mcp ${version} to ${REGISTRY_URL}"
-          if ./mcp-publisher publish; then
-            exit 0
-          fi
-          # A re-run after a lost response must not fail on "version already exists".
-          echo "publish returned non-zero; checking whether ${version} is already live"
-          curl -fsS "${REGISTRY_URL}/v0/servers?search=callrail" | python3 -c '
-          import json, sys
-          want = sys.argv[1]
-          live = [e.get("server", e) for e in json.load(sys.stdin).get("servers", [])]
-          ok = any(s.get("name") == "io.github.pghdma/callrail-mcp" and s.get("version") == want for s in live)
-          print("already live" if ok else "not live")
-          sys.exit(0 if ok else 1)
-          ' "$version"
 
-      - name: Confirm the registry lists the new version
-        run: |
-          set -euo pipefail
-          version="$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')"
-          curl -fsS "${REGISTRY_URL}/v0/servers?search=callrail" | python3 -c '
+          # The registry's search index lags a publish by tens of seconds, so
+          # poll rather than check once. Also used after a failed publish: a
+          # re-run after a lost response must succeed if the version is live.
+          listed() {
+            for attempt in $(seq 1 12); do
+              if curl -fsS "${REGISTRY_URL}/v0/servers?search=callrail" | python3 -c '
           import json, sys
           want = sys.argv[1]
           for e in json.load(sys.stdin).get("servers", []):
               s = e.get("server", e)
               if s.get("name") == "io.github.pghdma/callrail-mcp" and s.get("version") == want:
-                  latest = e.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {}).get("isLatest")
-                  print(f"registry has {want}, isLatest={latest}")
+                  meta = e.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {})
+                  print("registry lists", want, "(isLatest=%s, status=%s)" % (meta.get("isLatest"), meta.get("status")))
                   sys.exit(0)
-          sys.exit(f"registry does not list {want}")
-          ' "$version"
+          sys.exit(1)
+              ' "$version"; then
+                return 0
+              fi
+              echo "attempt ${attempt}/12: ${version} not listed yet, sleeping 10s"
+              sleep 10
+            done
+            return 1
+          }
+
+          echo "publishing io.github.pghdma/callrail-mcp ${version} to ${REGISTRY_URL}"
+          if ./mcp-publisher publish; then
+            echo "publish accepted"
+          else
+            echo "publish returned non-zero; if ${version} is already live this is a re-run and fine"
+          fi
+          listed || { echo "registry never listed ${version}"; exit 1; }
