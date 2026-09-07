@@ -15,8 +15,8 @@ Repo: https://github.com/pghdma/callrail-mcp. MIT, public.
 ## Release flow
 
 ```bash
-# 1. bump version in 3 places
-sed -i '' 's/0.X.Y/0.X.Z/g' src/callrail_mcp/__init__.py pyproject.toml src/callrail_mcp/client.py
+# 1. bump version in 4 files (server.json carries it twice; the registry rejects a re-used version)
+sed -i '' 's/0.X.Y/0.X.Z/g' src/callrail_mcp/__init__.py pyproject.toml src/callrail_mcp/client.py server.json
 # 2. edit CHANGELOG.md: move items from [Unreleased] to a new [0.X.Z] - YYYY-MM-DD section
 # 3. run checks
 .venv/bin/ruff check src tests && CALLRAIL_API_KEY=dummy .venv/bin/pytest -q
