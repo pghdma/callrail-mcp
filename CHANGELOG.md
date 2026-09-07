@@ -24,9 +24,33 @@ is still 57 tools on both MCP SDK majors.
   replaced with the punctuation that fit the sentence rather than one
   mechanical substitution, and no technical claim, bound, version tag,
   or severity marker was altered.
+- Two independent adversarial reviews checked all 184 replacements
+  against the original text and found 10 that had drifted. Those are
+  corrected: six in shipped tool descriptions where a dash had been
+  carrying a grammatical load a comma could not (`update_sms_thread`,
+  `list_sms_threads`, `bulk_update_calls`, `list_users`, `update_call`,
+  and the multiple-timezone log message), and four semicolons joining a
+  fragment to a clause. Both reviews separately confirmed the two
+  highest-risk changes are intact: the `noqa` suppressions still lex,
+  verified against ruff including `RUF100`, and the `paginate` warning
+  keeps its `%s`/`%r` placeholders in byte-identical order.
 - Repointed five stale `CLAUDE.md` references in this changelog, plus
   one in `server.py`, to `DEVELOPMENT.md`, the file's name since v1.2.0.
   They had been dangling pointers to a path no longer in the repository.
+- Fixed seven changelog list items where an earlier cleanup left a
+  line-leading stray comma or period, because the dash it replaced had
+  begun a continuation line.
+
+### Fixed: stale documentation
+
+- `SECURITY.md` listed 0.1.x as the supported release line and said CI
+  stopped at Python 3.13.
+- `CONTRIBUTING.md` said mypy runs non-blocking, which stopped being
+  true in v1.2.0 when it became a blocking `--strict` gate, and listed
+  two version-bump locations when there are four.
+- `DEVELOPMENT.md` published a local absolute path and numbered two
+  separate future-work items `6.`.
+- `Dockerfile` described the image as installing v1.0.0.
 
 ### Changed: CI
 
