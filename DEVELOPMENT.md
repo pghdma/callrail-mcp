@@ -113,7 +113,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.2.1
+## Current version: 1.2.2
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0`: initial 12 read tools
@@ -145,7 +145,7 @@ See `CHANGELOG.md` for full history. Highlights:
 
 ## Future work (deferred, see "API coverage limits" above)
 
-Still out of scope as of v1.2.1; will work on if/when:
+Still out of scope as of v1.2.2; will work on if/when:
 1. SMS send (when account gets A2P SMS API permission)
 2. Webhook integration CRUD (when account gets Integration-Admin permission)
 3. Outbound Caller IDs (if CallRail exposes via API)

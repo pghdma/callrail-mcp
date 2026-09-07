@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-07
+
+Maintenance release. The only change to the package is its version
+string; the code on PyPI is functionally identical to 1.2.1. This release
+exists to exercise the automated registry publishing path end to end.
+
 ### Changed: CI
 
 - **Registry publishing is now part of the release workflow.** After the
