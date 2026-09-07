@@ -99,3 +99,10 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
+# The MCP server class is resolved at runtime so the package works on both
+# SDK majors (see _load_mcp_server_class), which necessarily makes the
+# `@mcp.tool()` decorator untyped. Everything else stays strict.
+[[tool.mypy.overrides]]
+module = "callrail_mcp.server"
+disallow_untyped_decorators = false
+

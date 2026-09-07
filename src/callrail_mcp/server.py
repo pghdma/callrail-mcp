@@ -24,18 +24,34 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-try:  # mcp 1.x
-    from mcp.server.fastmcp import FastMCP as _MCPServer
-except ModuleNotFoundError:  # pragma: no cover - exercised by the mcp2 CI job
-    # mcp 2.0 (released 2026-07-28) renamed FastMCP to MCPServer and removed
-    # the old module entirely. The surface we rely on (.tool() decorator,
-    # .run(), ._tool_manager) is unchanged, so a rebind is sufficient.
-    # Without this, `pip install callrail-mcp` resolves mcp 2.x and the
-    # package fails to import at all.
-    # Only one of the two module paths exists in any given install, so
-    # whichever major mypy resolves against, the other is unresolvable.
-    from mcp.server.mcpserver import (  # type: ignore[no-redef,import-not-found]
-        MCPServer as _MCPServer,
+# MCP Python SDK 2.0 (released 2026-07-28) renamed FastMCP to MCPServer and
+# replaced `mcp.server.fastmcp` with a stub that raises on import. The surface
+# we rely on (.tool() decorator, .run(), ._tool_manager) is unchanged, so
+# binding whichever class exists keeps us working on both majors. Without
+# this, `pip install callrail-mcp` resolves mcp 2.x and fails at import.
+#
+# Resolved dynamically rather than with a plain `try: import`, because under
+# mcp 2.x the stub module still exists for static analysis: mypy sees
+# `mcp.server.fastmcp` present but missing `FastMCP`, and errors on the happy
+# path of a try/except it cannot evaluate.
+def _load_mcp_server_class() -> Any:
+    """Return the server class for whichever MCP SDK major is installed."""
+    import importlib
+
+    for module_name, attr in (
+        ("mcp.server.fastmcp", "FastMCP"),      # mcp 1.x
+        ("mcp.server.mcpserver", "MCPServer"),  # mcp 2.x
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        candidate = getattr(module, attr, None)
+        if candidate is not None:
+            return candidate
+    raise ImportError(
+        "Could not locate the MCP server class. Install a supported SDK: "
+        "`pip install 'mcp>=1.23.0'` (both 1.x and 2.x are supported)."
     )
 
 from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
@@ -71,7 +87,7 @@ class _ClientProxy:
 
 
 client = _ClientProxy()
-mcp = _MCPServer("callrail-mcp")
+mcp = _load_mcp_server_class()("callrail-mcp")
 
 
 # ---- Shared helpers ----

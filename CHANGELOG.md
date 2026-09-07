@@ -22,7 +22,10 @@ or by probing the live CallRail API, not by reading code alone.
   installing the published 1.1.3 from PyPI into a clean venv.
   The package now imports `FastMCP` with a fallback to `MCPServer`, so
   it works on **both** SDK majors rather than pinning users to the old
-  one. CI gained a matrix job that installs each major explicitly.
+  one. The class is resolved at runtime rather than via a plain
+  try/except import, because mcp 2.x keeps a raising stub at the old
+  module path that static analysis still resolves. CI gained a matrix
+  job that installs each major explicitly.
 
 ### Fixed (CRITICAL): filters that silently matched everything
 
