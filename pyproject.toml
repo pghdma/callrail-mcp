@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "callrail-mcp"
-version = "1.2.0"
+version = "1.2.1"
 description = "Model Context Protocol (MCP) server for the CallRail REST API v3"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -66,8 +66,8 @@ packages = ["src/callrail_mcp"]
 artifacts = ["src/callrail_mcp/py.typed"]
 
 # hatchling's sdist otherwise sweeps in everything not covered by the root
-# .gitignore, which for a working copy means .claude/, .hypothesis/ and other
-# local state. Enumerate what belongs in a source distribution instead.
+# .gitignore, which for a working copy means local editor state and test
+# caches. Enumerate what belongs in a source distribution instead.
 [tool.hatch.build.targets.sdist]
 include = [
     "src/callrail_mcp",

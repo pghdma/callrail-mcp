@@ -52,13 +52,13 @@ dmypy.json
 # OS
 .DS_Store
 
-# Secrets — never commit
+# Secrets: never commit
 .env
 *.api-key
 callrail-api-key.txt
 mcp-publisher
 
-# Agent tool pointers (local only; canonical notes live in DEVELOPMENT.md)
+# Local editor and tooling state (canonical notes live in DEVELOPMENT.md)
 CLAUDE.md
 AGENTS.md
 .claude/

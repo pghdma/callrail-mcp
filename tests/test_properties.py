@@ -2,7 +2,7 @@
 
 These pin invariants that example-based tests can't exhaustively cover:
 
-1. usage_summary's money invariant — per-company cost shares sum to the
+1. usage_summary's money invariant: per-company cost shares sum to the
    agency total EXACTLY (cent-level), for arbitrary fleets. This is the
    largest-remainder rounding guarantee that invoice reconciliation
    depends on.

@@ -4,7 +4,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install the package from PyPI (already published as v1.0.0).
+# Install the latest published release from PyPI.
 RUN pip install --no-cache-dir callrail-mcp
 
 # CallRail API key must be supplied at runtime via env var or mounted file:

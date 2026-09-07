@@ -57,7 +57,7 @@ def _load_mcp_server_class() -> Any:
     )
 
 
-# Library hygiene: do NOT call logging.basicConfig here — that mutates the
+# Library hygiene: do NOT call logging.basicConfig here. That mutates the
 # host application's global logging config. Just request a logger; users
 # configure handlers/levels themselves. CALLRAIL_LOG_LEVEL is honored only
 # when this module's __main__ entry point runs (see main()).
@@ -79,7 +79,7 @@ def get_client() -> CallRailClient:
     return _client
 
 
-# Backwards-compatibility shim — older code may reference `server.client`.
+# Backwards-compatibility shim: older code may reference `server.client`.
 class _ClientProxy:
     """Forwards attribute access to the lazy-built client."""
 
@@ -123,7 +123,7 @@ def _date_window(
     - Explicit dates always win over `days`.
     - `days <= 0` is treated as "no window" only if the caller passes None or 0
       explicitly; the calling tool is responsible for validating positive values.
-    - `tz` is the IANA timezone for "today" — defaults to UTC. Pass the
+    - `tz` is the IANA timezone for "today"; defaults to UTC. Pass the
       account's `time_zone` (e.g. "America/New_York") to align day
       boundaries with the user's business day rather than UTC midnight.
       A user in PT asking for `days=1` at 5pm PT (= 1am next-day UTC)
@@ -132,7 +132,7 @@ def _date_window(
 
     Defensively coerces string `days` (e.g. `"7"` from MCP clients sending
     loose JSON) to int. `_validate_window` does the same coercion but only
-    returns a (ok, msg) tuple — without this, the original string would
+    returns a (ok, msg) tuple; without this, the original string would
     flow into `days > 0` and raise TypeError.
     """
     if isinstance(days, str):
@@ -158,7 +158,7 @@ def _date_window(
             # Explicit end_date wins (docstring contract: "Explicit dates
             # always win over `days`"). Anchor the days-lookback to the
             # caller's end_date instead of silently overwriting it with
-            # today — previously `list_calls(end_date="2026-06-01")`
+            # today. Previously `list_calls(end_date="2026-06-01")`
             # returned the window ending TODAY, ignoring the caller's
             # end_date entirely (wrong data, no error).
             try:
@@ -200,18 +200,18 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
 
     CallRail returns `time_zone` on each company. In practice all companies
     in an agency share the same TZ, but multi-region agencies CAN have
-    mixed TZs — in that case we use the first active company's TZ and warn.
+    mixed TZs; in that case we use the first active company's TZ and warn.
     Returns "UTC" on any miss so callers always get a usable string.
 
     Also warns on legacy non-IANA TZ names (e.g. "EST", "PST") which
-    `zoneinfo.ZoneInfo` accepts but represents as fixed offsets — these
+    `zoneinfo.ZoneInfo` accepts but represents as fixed offsets; these
     do NOT observe DST, so day boundaries drift by 1 hour for half the year.
 
     Warnings are deduped per process (set tracks already-warned values)
     to avoid log spam on repeated `usage_summary` / `compare_periods`
     calls.
 
-    Reuses the already-fetched companies list — no extra API call.
+    Reuses the already-fetched companies list (no extra API call).
     """
     found_tzs = {
         c.get("time_zone")
@@ -224,7 +224,7 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
         if signature not in _warned_multi_tz_signature:
             _warned_multi_tz_signature.add(signature)
             logger.warning(
-                "Multiple time zones across active companies %s — using first; "
+                "Multiple time zones across active companies %s, using first; "
                 "consider passing tz explicitly to aggregation tools.",
                 sorted(signature),
             )
@@ -234,7 +234,7 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
             if tz.upper() in _LEGACY_TZS and tz not in _warned_tzs:
                 _warned_tzs.add(tz)
                 logger.warning(
-                    "CallRail returned legacy TZ %r — this is treated as a "
+                    "CallRail returned legacy TZ %r; this is treated as a "
                     "fixed offset (no DST). Map to canonical IANA "
                     "(e.g. 'America/New_York') in CallRail UI for correctness.",
                     tz,
@@ -259,13 +259,13 @@ def _tag_names_from(tags: Any) -> list[str]:
     Defensively rejects non-list iterables. A string `"hot"` would
     iterate as ['h','o','t'] and corrupt real tags. A dict `{"id": 1}`
     would iterate keys. An int crashes outright. `_tag_names_from` MUST
-    receive a list (or None) — anything else returns [] with a warning.
+    receive a list (or None); anything else returns [] with a warning.
     """
     if tags is None:
         return []
     if not isinstance(tags, list):
         logger.warning(
-            "_tag_names_from received non-list %s — returning []. "
+            "_tag_names_from received non-list %s, returning []. "
             "CallRail's tags field should always be a list of dicts/strings.",
             type(tags).__name__,
         )
@@ -288,7 +288,7 @@ def _coerce_days_int(days: Any) -> int | None:
     int comparisons (e.g. spam_detector's 90-day cap) can't be bypassed
     by string `days` from loose-JSON MCP clients.
     """
-    # `bool` is a subclass of int — reject explicitly.
+    # `bool` is a subclass of int, so reject explicitly.
     if isinstance(days, bool):
         return None
     if isinstance(days, int):
@@ -313,7 +313,7 @@ def _validate_window(
     """Cross-field validation for date windows used by listing tools.
 
     Args:
-        require_window: If True, reject `days=0` AND no start_date — without
+        require_window: If True, reject `days=0` AND no start_date. Without
             this guard, _date_window returns {} and CallRail returns ALL-TIME
             history, which silently blows up aggregating tools (cost
             estimates, summaries). Default False to preserve existing
@@ -330,7 +330,7 @@ def _validate_window(
             f"Pass an integer number of days (or omit for default)."
         )
     # Coerce string-typed days from MCP clients that send loose JSON.
-    # Reject non-integer floats explicitly — `int(1.5)` silently truncates,
+    # Reject non-integer floats explicitly: `int(1.5)` silently truncates,
     # which would surprise a user who wrote `days=1.5` expecting ~36h.
     if isinstance(days, float):
         if not days.is_integer():
@@ -371,7 +371,7 @@ def _validate_window(
 
 # CallRail's real answer-status filter on GET /calls.json. Verified live
 # 2026-09-07: `answer_status=answered` + `answer_status=missed` partition the
-# window exactly (885 + 220 = 1105 total). There is NO `answered` param —
+# window exactly (885 + 220 = 1105 total). There is NO `answered` param;
 # passing one is silently ignored and returns every call.
 VALID_ANSWER_STATUS: tuple[str, ...] = ("answered", "missed", "voicemail")
 
@@ -411,7 +411,7 @@ def _resolve_answer_status(
 
 def _clamp_per_page(per_page: int) -> int:
     """Clamp per_page to [1, MAX_PER_PAGE]. Silently corrects nonsense input
-    (including non-int types — "" / "250" / None previously raised raw
+    (including non-int types: "" / "250" / None previously raised raw
     TypeError from the < comparison; 2026-07 all-tool fuzz finding)."""
     try:
         pp = int(per_page)
@@ -477,10 +477,10 @@ _MAX_TAGS_PER_REQUEST = 100
 _MAX_CUSTOMER_NAME_LEN = 200
 _VALID_TRACKER_STATUSES: tuple[str, ...] = ("active", "disabled")
 # Loose E.164-ish: optional + then 10-15 ASCII digits. Accepts +14125551234,
-# 14125551234. ASCII-only — rejects e.g. Devanagari digits ('\u0966' etc.)
+# 14125551234. ASCII-only: rejects e.g. Devanagari digits ('\u0966' etc.)
 # that Python's `\d` would otherwise match.
 _PHONE_RE = re.compile(r"^\+?[0-9]{10,15}$")
-_AREA_CODE_RE = re.compile(r"^[0-9]{3}$")  # was ^\d{3}$ — Unicode-digit safe
+_AREA_CODE_RE = re.compile(r"^[0-9]{3}$")  # was ^\d{3}$ (Unicode-digit safe)
 _TRACKER_ID_RE = re.compile(r"^TRK[A-Za-z0-9_-]+$")
 _COMPANY_ID_RE = re.compile(r"^COM[A-Za-z0-9_-]+$")
 _TAG_ID_RE = re.compile(r"^[0-9]+$")  # Tag IDs are numeric in CallRail.
@@ -515,7 +515,7 @@ def _validate_id_shape(
     """Validate a CallRail ID looks like a single URL-safe segment.
 
     - Must not contain '/' (multi-segment paths would reach different
-      endpoints — CallRail 404s, but we shouldn't send the request).
+      endpoints; CallRail 404s, but we shouldn't send the request).
     - Must not be just dots (those slip past `_safe_path`'s exact-match
       check when concatenated with a file extension like '.json').
     - Must not contain bidi/zero-width/combining characters that would
@@ -532,14 +532,14 @@ def _validate_id_shape(
             f"{field_name}={value!r} may not contain '/'. "
             f"IDs must be single URL path segments."
         )
-    # Catch values that are only dots — they collide with .json suffix in
+    # Catch values that are only dots: they collide with .json suffix in
     # URL construction and produce bogus paths (e.g. tracker_id='..' →
     # 'trackers/...json', which isn't traversal but wastes an API call).
     if set(value.strip()) <= {"."}:
         return False, f"{field_name}={value!r} cannot consist only of dots."
     # Reject bidi controls / zero-width / combining marks. These pass
     # `_safe_path`'s control-char filter (which only blocks ord<0x20|0x7f)
-    # but cause display ambiguity — an ID like 'TRK\u202eABC' renders as
+    # but cause display ambiguity: an ID like 'TRK\u202eABC' renders as
     # 'TRKCBA' in many UIs, masking spoofed values in logs.
     bad = [c for c in value if unicodedata.category(c) in _BANNED_UNICODE_CATEGORIES]
     if bad:
@@ -597,8 +597,8 @@ def _validate_length(value: str, field_name: str, max_len: int) -> tuple[bool, s
 
 def _validate_finite(value: float, field_name: str) -> tuple[bool, str]:
     """Reject NaN/Infinity in numeric fields. json.dumps serializes them
-    as bare NaN/Infinity tokens (allow_nan=True default) — which is NOT
-    valid JSON — so they'd reach CallRail as a malformed request body."""
+    as bare NaN/Infinity tokens (allow_nan=True default), which is NOT
+    valid JSON, so they'd reach CallRail as a malformed request body."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False, f"{field_name} must be a number (got {type(value).__name__})."
     import math
@@ -648,7 +648,7 @@ def list_companies(
         status: Filter by status. Defaults to None (returns all). Common values:
             'active' (excludes disabled/soft-deleted), 'disabled'.
         page: 1-indexed. Agencies with more than `per_page` companies
-            need this to reach the rest — previously there was no way
+            need this to reach the rest. Previously there was no way
             to fetch page 2 via this tool.
     """
     try:
@@ -665,7 +665,7 @@ VALID_TRACKER_TYPES: tuple[str, ...] = ("source", "session")
 # Union of CallRail's now-documented enum (apidocs.callrail.com
 # #source-tracker-call-sources, published since we discovered the
 # original set empirically) and values proven working in production
-# that the docs still omit (facebook_all / bing_all — live trackers
+# that the docs still omit (facebook_all / bing_all: live trackers
 # exist using them). Any other source.type value returns 400
 # "Source Unknown tracking source type".
 #
@@ -763,13 +763,13 @@ def create_tracker(
 ) -> str:
     """⚠️  Create a new tracking phone number (tracker). **THIS COSTS MONEY.**
 
-    CallRail charges per provisioned number — typical pricing as of 2026:
+    CallRail charges per provisioned number. Typical pricing as of 2026:
       - Local numbers: ~$3/month each
       - Toll-free (8XX): ~$3-5/month each
       - Session pools: charged per number × pool_size (so pool_size=8 = 8x)
       - Plus per-minute usage (~$0.05/min on answered calls)
 
-    Most plans bundle 5–10 numbers; provisioning beyond your bundle adds
+    Most plans bundle 5-10 numbers; provisioning beyond your bundle adds
     overage charges. Some plans prorate partial-month usage, so creating
     and immediately deleting can still produce a small charge depending
     on your contract.
@@ -781,7 +781,7 @@ def create_tracker(
         name: Display name for the tracker (e.g. "Google Ads Call Extension").
         company_id: 'COM...' id of the company this tracker belongs to.
         destination_number: Where calls forward to, e.g. "+14129548337".
-        confirm_billing: REQUIRED — set True to acknowledge the per-number
+        confirm_billing: REQUIRED. Set True to acknowledge the per-number
             cost. Returns an error envelope if False (default).
         type: 'source' (single number tied to one traffic source) or 'session'
             (DNI pool that swaps numbers per visitor). Default 'source'.
@@ -935,7 +935,7 @@ def update_tracker(
             the call_flow's destination too.
         whisper_message: New whisper text.
         greeting_text: New automated greeting. **If supplied, you must also
-            supply destination_number** — CallRail's PUT /trackers replaces the
+            supply destination_number**. CallRail's PUT /trackers replaces the
             entire call_flow object, so updating only greeting_text would
             silently zero out the destination, breaking the tracker.
         sms_enabled: Toggle SMS on/off.
@@ -993,7 +993,7 @@ def update_tracker(
     if greeting_text is not None and destination_number is None:
         return _err_msg(
             "Updating greeting_text requires also passing destination_number "
-            "(CallRail's PUT replaces the entire call_flow object — supplying "
+            "(CallRail's PUT replaces the entire call_flow object; supplying "
             "only greeting_text would zero out the destination). Pass both, "
             "or call get_tracker first to read the existing destination_number."
         )
@@ -1081,7 +1081,7 @@ def list_calls(
             CLIENT-SIDE to the current page only: the `calls` array is
             filtered by exact, case-insensitive match on each call's `source`
             field. `total_records`/`total_pages` in the response still
-            describe the UNFILTERED query — see `source_filter` in the
+            describe the UNFILTERED query. See `source_filter` in the
             response for what was actually applied. For source breakdowns
             prefer `call_stats(group_by='source')`.
         per_page: Max 250.
@@ -1176,7 +1176,7 @@ def call_summary(
     duration, and breakdowns by `source` and `source_name`. Useful for
     weekly/monthly rollups without pulling every call into context.
 
-    Note: requires `days>=1` or an explicit `start_date` — without a window
+    Note: requires `days>=1` or an explicit `start_date`. Without a window
     this would paginate the entire account history (potentially 50+ pages
     of 250 calls each), which is rarely what callers want.
     """
@@ -1210,7 +1210,7 @@ def call_summary(
                 first_time += 1
             else:
                 repeat += 1
-            # Robust int coercion — match usage_summary's defense (CallRail
+            # Robust int coercion: match usage_summary's defense (CallRail
             # currently returns int but shape changes shouldn't crash mid-loop).
             raw_duration = c.get("duration") or 0
             try:
@@ -1242,7 +1242,7 @@ def call_summary(
                     f"Only the first {scan.get('items_yielded')} calls were "
                     f"scanned (pagination cap of {scan.get('max_pages')} pages); "
                     f"CallRail reports {scan.get('total_records')} total. "
-                    f"Counts below UNDERSTATE the window — narrow the date "
+                    f"Counts below UNDERSTATE the window. Narrow the date "
                     f"range or filter by company_id."
                 ) if scan.get("truncated") else None,
             }
@@ -1349,7 +1349,7 @@ def list_text_messages(
 @mcp.tool()
 def list_users(account_id: str | None = None) -> str:
     """List all users on the account. Returns a single page of up to
-    `MAX_PER_PAGE` users (no pagination support — fits small/medium
+    `MAX_PER_PAGE` users (no pagination support, which fits small/medium
     agency accounts).
 
     Args:
@@ -1371,11 +1371,11 @@ def list_users(account_id: str | None = None) -> str:
 @mcp.tool()
 def get_call_recording(call_id: str, account_id: str | None = None) -> str:
     """Get the recording URL for a call. Returns a short-lived signed
-    URL — fetch and use it within a few minutes before it expires.
+    URL. Fetch and use it within a few minutes before it expires.
 
     Recording must be enabled on the company (CallRail UI > Settings >
     Account). Calls placed BEFORE recording was enabled have no
-    recording even if it's enabled now — CallRail does not retroactively
+    recording even if it's enabled now; CallRail does not retroactively
     record.
 
     Args:
@@ -1407,11 +1407,11 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
     Intelligence (CallScribe) to be enabled on the company at the time
     the call was placed.
 
-    If CallScribe was enabled AFTER the call, no transcript exists —
+    If CallScribe was enabled AFTER the call, no transcript exists;
     CallRail does not retroactively transcribe.
 
     ⚠️  As of CallRail's 2026-05-21 API change, transcript data requires
-    a **Premium Conversation Intelligence** subscription — without it,
+    a **Premium Conversation Intelligence** subscription; without it,
     the endpoint 404s (and the `transcription` field on calls returns
     null) even when a transcript exists. A 404 here therefore means
     EITHER "no transcript for this call" OR "plan doesn't include
@@ -1445,7 +1445,7 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
                 "message": str(e),
                 "hint": (
                     "404 here means either (a) no transcript exists for "
-                    "this call (CallScribe wasn't enabled at call time — "
+                    "this call (CallScribe wasn't enabled at call time; "
                     "CallRail does not retroactively transcribe), or "
                     "(b) since CallRail's 2026-05-21 API change, your "
                     "plan lacks Premium Conversation Intelligence, which "
@@ -1467,14 +1467,14 @@ def search_calls_by_number(
     of the stored `customer_phone_number` so any format works.
 
     Args:
-        phone_number: Any format — will be normalized to digits-only.
+        phone_number: Any format, normalized to digits-only.
             Must contain at least 7 digits to avoid false positives.
         account_id: Auto-resolves.
         company_id: Optional company filter.
         days: Lookback window (default 90).
     """
     # A phone number arriving as a JSON number (int) is plausible from
-    # loose MCP clients — coerce rather than crash. Anything else
+    # loose MCP clients. Coerce rather than crash. Anything else
     # non-string is rejected with an envelope (fuzz finding: int/bytes
     # previously raised raw TypeError from _digits_only / .isdigit).
     if isinstance(phone_number, int) and not isinstance(phone_number, bool):
@@ -1491,7 +1491,7 @@ def search_calls_by_number(
         )
     if len(digits) > 10:
         digits = digits[-10:]
-    # require_window=True — without a window we'd paginate all-time
+    # require_window=True: without a window we'd paginate all-time
     # call history just to filter for a phone match, which is hugely
     # wasteful (the user almost certainly wants recent calls).
     ok, msg = _validate_window(days, None, None, require_window=True)
@@ -1566,7 +1566,7 @@ def update_call(
         tags: REPLACE the call's tag list with this set of tag names.
               (Use `add_call_tags`/`remove_call_tags` for additive changes.)
         spam: True to mark as spam, False to unmark. Note: spam-flagged calls
-              are HIDDEN from default GET endpoints — re-reads will 404. Tag
+              are HIDDEN from default GET endpoints; re-reads will 404. Tag
               the call BEFORE flagging spam if you need both.
         customer_name: Override the auto-detected caller name.
         lead_status: e.g. 'good_lead', 'not_a_lead', 'unknown'.
@@ -1574,10 +1574,10 @@ def update_call(
     Note: `value` is intentionally NOT exposed here. CallRail's API returns
     a 500 server error when `value` is included in the PUT body to /calls
     (verified via live testing 2026-04-24). It IS supported on form
-    submissions — see `update_form_submission`.
+    submissions. See `update_form_submission`.
 
     Empty-string fields (e.g. `note=""`) are rejected because CallRail
-    interprets them as "clear this field" — almost always a mistake.
+    interprets them as "clear this field", almost always a mistake.
     To intentionally clear a field, set it to None and use a separate UI
     operation, or contact CallRail support.
 
@@ -1644,7 +1644,7 @@ def _clean_tag_list(tags: list[str] | None) -> list[str]:
         return []
     if not isinstance(tags, list):
         logger.warning(
-            "_clean_tag_list received non-list %s — returning []. "
+            "_clean_tag_list received non-list %s, returning []. "
             "tags must be a list of strings.", type(tags).__name__,
         )
         return []
@@ -1677,7 +1677,7 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
     Auto-creates company-level tags for any name not already in the
     system (CallRail's default behavior). Empty/whitespace-only entries
     are silently filtered, so `add_call_tags(['', 'lead'])` won't 400
-    — only `'lead'` is sent.
+    (only `'lead'` is sent).
 
     Args:
         call_id: 'CAL...' id.
@@ -1712,7 +1712,7 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
 def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
     """Remove specific tags from a call (case-sensitive on tag name).
 
-    Idempotent — removing a tag that isn't attached succeeds silently.
+    Idempotent: removing a tag that isn't attached succeeds silently.
     Empty/whitespace-only entries in the input list are ignored.
     """
     ok, msg = _require_non_empty(call_id, "call_id")
@@ -1753,7 +1753,7 @@ def update_form_submission(
         note, tags, value, spam, lead_status: same semantics as `update_call`.
 
     Empty-string fields (e.g. `note=""`) are rejected to prevent accidental
-    field-clearing — see `update_call` docstring.
+    field-clearing. See `update_call` docstring.
 
     Length caps (rejected pre-network):
         - `note`: 4000 chars
@@ -1836,7 +1836,7 @@ def create_tag(
 
     Args:
         name: Tag display name.
-        company_id: Required — tags are per-company in CallRail.
+        company_id: Required (tags are per-company in CallRail).
         account_id: Auto-resolves if omitted.
         color: One of the 24 CallRail-supported colors (see
             VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
@@ -1845,7 +1845,7 @@ def create_tag(
     """
     # Fail fast pre-network (project convention: validate before burning
     # the resolve_account_id call). Previously create_tag('' , '') went
-    # straight to the network — the only write tool with no input checks.
+    # straight to the network; it was the only write tool with no input checks.
     ok, msg = _require_non_empty(name, "name")
     if not ok:
         return _err_msg(msg)
@@ -1900,7 +1900,7 @@ def update_tag(
     ok, msg = _validate_id_shape(tag_id, "tag_id")
     if not ok:
         return _err_msg(msg)
-    # CallRail tag IDs are numeric — fail-fast on alphabetic / mixed inputs.
+    # CallRail tag IDs are numeric: fail-fast on alphabetic / mixed inputs.
     if not _TAG_ID_RE.match(tag_id):
         return _err_msg(f"tag_id={tag_id!r} must be numeric (CallRail tag IDs are integers).")
     if name is not None:
@@ -1930,14 +1930,14 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
     """Delete a tag definition from the account. Removes it from any
     calls or form submissions that had it applied.
 
-    This is a HARD delete — the tag is gone permanently along with its
+    This is a HARD delete; the tag is gone permanently along with its
     historical applications. To preserve history, prefer renaming or
     disabling via `update_tag` instead.
 
     Args:
         tag_id: Numeric tag ID. CallRail tag IDs are integers (NOT
             the string-prefixed format other entities use). Must match
-            ^[0-9]+$ — accepts string or numeric forms.
+            ^[0-9]+$ (string or numeric forms accepted).
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
@@ -1971,7 +1971,7 @@ def delete_tag(tag_id: str, account_id: str | None = None) -> str:
 
 # CallRail Call Tracking Starter pricing (verified 2026-04-24 against the
 # user's own billing dashboard at /settings/.../account/billing). Update
-# these constants if you switch plans — they're public knowledge and not
+# these constants if you switch plans; they're public knowledge and not
 # CallRail-side configurable for the integration.
 PRICING_BASE_MONTHLY = 50.00
 PRICING_BUNDLED_NUMBERS = 5
@@ -1992,7 +1992,7 @@ def _is_toll_free(number: str | None) -> bool:
     """True for North American toll-free prefixes (NANP only).
 
     Returns False for non-NANP numbers (international, shortcodes, etc.)
-    rather than mis-classifying them as local — the cost model in
+    rather than mis-classifying them as local; the cost model in
     `usage_summary` doesn't price non-NANP numbers correctly anyway.
 
     Extracts ASCII digits and looks at the first 11 starting with '1'.
@@ -2079,9 +2079,9 @@ def usage_summary(
 
         # 2. Pull active trackers per company. Numbers/pool_size aggregate
         # the count of provisioned numbers (CallRail bills per number, not
-        # per tracker — a session pool of 4 = 4 numbers).
+        # per tracker; a session pool of 4 = 4 numbers).
         # 3. Pull calls per company in the window for minute aggregation.
-        # Both use paginate() — a busy client easily exceeds 250 calls in
+        # Both use paginate(): a busy client easily exceeds 250 calls in
         # a 30-day window (Malick at ~800 minutes was definitely truncated
         # before we wired up pagination).
         date_params = _date_window(days, start_date, end_date, tz=account_tz)
@@ -2125,13 +2125,13 @@ def usage_summary(
                     f"a/{aid}/calls.json", call_params, items_key="calls", stats=scan,
                 ):
                     call_count += 1
-                    # Robust int coercion — CallRail returns int but defend
+                    # Robust int coercion: CallRail returns int but defend
                     # against future changes that ship strings/floats.
                     raw_duration = call.get("duration") or 0
                     try:
                         total_seconds += int(float(raw_duration))
                     except (TypeError, ValueError):
-                        # Log + skip — surfaces malformed data without
+                        # Log + skip: surfaces malformed data without
                         # crashing the report.
                         logger.warning(
                             "usage_summary: skipping call with malformed "
@@ -2174,7 +2174,7 @@ def usage_summary(
 
         # 4. Compute cost shares. We attribute the bundle (5 numbers, 250
         # minutes) proportionally to each company's contribution to the
-        # agency total — biggest users absorb more of the "free tier" but
+        # agency total; biggest users absorb more of the "free tier" but
         # also more of the overage.
         total_local = sum(c["active_local_numbers"] for c in per_company)
         total_tollfree = sum(c["active_tollfree_numbers"] for c in per_company)
@@ -2182,7 +2182,7 @@ def usage_summary(
         # Number-overage cost (charge only for numbers beyond bundle).
         local_overage_count = max(0, total_local - PRICING_BUNDLED_NUMBERS)
         # Toll-free numbers don't share the local-number bundle in
-        # CallRail's pricing — every TF is overage.
+        # CallRail's pricing: every TF is overage.
         local_overage_cost = local_overage_count * PRICING_PER_LOCAL_NUMBER
         tollfree_overage_cost = total_tollfree * PRICING_PER_TOLLFREE_NUMBER
         # Minute-overage cost.
@@ -2193,7 +2193,7 @@ def usage_summary(
             2,
         )
         # Per-company attribution: split the bill proportionally by
-        # (numbers + minutes) contribution. Pure proportionality — not a
+        # (numbers + minutes) contribution. Pure proportionality is not a
         # perfect cost model (the bundle "rebates" larger users more) but
         # it's a reasonable starting point. ALWAYS attribute base cost so
         # `sum(per-company costs) == agency_total` even when minutes==0.
@@ -2218,7 +2218,7 @@ def usage_summary(
             )
             # Base attribution: prefer (numbers+minutes) blended share.
             # If neither numbers nor minutes exist on any company, fall
-            # back to even split — the base is owed regardless.
+            # back to even split; the base is owed regardless.
             denom = total_local + total_tollfree + total_minutes
             if denom > 0:
                 resource_share = (
@@ -2233,7 +2233,7 @@ def usage_summary(
             # Store unrounded for largest-remainder reconciliation pass below.
             company_row["_cost_unrounded"] = cost
         # Largest-remainder rounding: round each share to cents, then
-        # distribute the rounding residual (typically ±$0.01–0.05) to the
+        # distribute the rounding residual (typically ±$0.01 to $0.05) to the
         # row with the largest fractional remainder. Ensures
         # sum(per-company costs) == agency_total exactly, matching what
         # a CallRail invoice would show.
@@ -2245,7 +2245,7 @@ def usage_summary(
                 # Sort by largest fractional remainder; adjust one cent at
                 # a time until residual is zero. Positive residual = bump
                 # up; negative = bump down. Cycle through `remainders` if
-                # residual exceeds row count (defensive — current pricing
+                # residual exceeds row count (defensive: current pricing
                 # math bounds residual to ~N cents, but float drift on
                 # huge accounts could exceed it).
                 remainders = sorted(
@@ -2294,7 +2294,7 @@ def usage_summary(
                 "(numbers + minutes) contribution; a perfectly fair model would "
                 "credit larger users for absorbing more of the bundle.",
                 "Toll-free minute pricing ($0.08 vs $0.05 local) is NOT yet "
-                "differentiated — all minutes priced at local rate. Negligible "
+                "differentiated; all minutes priced at local rate. Negligible "
                 "for accounts without toll-free numbers.",
                 "SMS overage is not included in the cost estimate.",
                 "Partial failures (per-company API errors) appear in "
@@ -2334,7 +2334,7 @@ def call_eligibility_check(
          per conversion action in Google Ads UI.)
       4. Is the call from a Google source? Detection uses CallRail's
          internal `source` slug (e.g. `google_paid`, `google_my_business`)
-         + presence of gclid — NOT the user-editable `source_name` display
+         + presence of gclid, NOT the user-editable `source_name` display
          string (which can mislead, e.g. "Bing Ads (Google legacy import)"
          would substring-match as Google but is clearly Bing).
 
@@ -2354,7 +2354,7 @@ def call_eligibility_check(
     ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
     if not ok:
         return _err_msg(msg)
-    # Coerce before comparing — loose-JSON clients sending "60"/None
+    # Coerce before comparing: loose-JSON clients sending "60"/None
     # previously raised raw TypeError from the < comparison.
     threshold = _coerce_days_int(google_ads_min_duration_seconds)
     if threshold is None or threshold < 0:
@@ -2372,7 +2372,7 @@ def call_eligibility_check(
                 "fields": (
                     # `source` is the CallRail-internal slug (e.g. 'google_paid',
                     # 'bing_paid'). More reliable than `source_name` for source
-                    # detection — user-facing tracker names can mislead
+                    # detection. User-facing tracker names can mislead
                     # (e.g. "Bing Ads (migrated from Google)" would substring-
                     # match as Google on source_name but is clearly Bing).
                     "gclid,utm_source,utm_medium,duration,answered,"
@@ -2393,7 +2393,7 @@ def call_eligibility_check(
         utm_source = _lower_str(call_data.get("utm_source"))
         source_slug = _lower_str(call_data.get("source"))
         source_name = _lower_str(call_data.get("source_name"))
-        # Robust int coercion — CallRail returns int but defend against
+        # Robust int coercion: CallRail returns int but defend against
         # future schema changes (string/float).
         raw_duration = call_data.get("duration") or 0
         try:
@@ -2411,7 +2411,7 @@ def call_eligibility_check(
         # CallRail internal `source` slug starts with 'google_' (e.g.
         # 'google_paid', 'google_organic', 'google_my_business') OR has
         # gclid. The gclid signal is honest: "gclid" stands for Google
-        # Click ID — it can only be minted by Google Ads. So presence
+        # Click ID; it can only be minted by Google Ads. So presence
         # proves Google origin even when CallRail's source_name is
         # generic (e.g. "Website Pool" for a DNI session that happens
         # to have served a Google Ads visitor).
@@ -2421,7 +2421,7 @@ def call_eligibility_check(
         # "Google Organic", "Google My Business", "Bing Organic", "Direct".
         # The old slug tests (`== "google"` / `startswith("google_")`) never
         # matched anything, so every Google Ads call WITHOUT a gclid was
-        # reported as not-Google — in the one tool built to debug Google Ads.
+        # reported as not-Google, in the one tool built to debug Google Ads.
         # Match the display form instead, while still excluding Bing/other.
         _src = source_slug or source_name
         is_google = (
@@ -2442,7 +2442,7 @@ def call_eligibility_check(
         reasons: list[str] = []
         if not checks["has_gclid"]:
             reasons.append(
-                "No gclid captured — call cannot be uploaded as Google Ads "
+                "No gclid captured: call cannot be uploaded as Google Ads "
                 "conversion. Likely from SERP call-extension (Google tracks "
                 "those natively as 'Calls from ads') or from a non-Google "
                 "source (GMB, organic, Bing)."
@@ -2485,11 +2485,11 @@ def call_eligibility_check(
             "notes": [
                 "This tool checks LIKELY eligibility based on CallRail's "
                 "default integration behavior + Google Ads' default minimum "
-                "duration. Your actual configuration may differ — check "
+                "duration. Your actual configuration may differ; check "
                 "CallRail Integrations > Google Ads > Integration Filters.",
                 "SERP call-extension calls (where the user taps the phone "
                 "icon directly in a Google ad) are tracked by Google natively "
-                "as AD_CALL conversions, NOT through CallRail upload — so "
+                "as AD_CALL conversions, NOT through CallRail upload, so "
                 "lacking a gclid here doesn't mean Google didn't count them.",
             ],
         })
@@ -2498,7 +2498,7 @@ def call_eligibility_check(
 
 
 # ============================================================
-# v0.5.0 — agency workflow tools (period comparison, bulk update, spam)
+# v0.5.0: agency workflow tools (period comparison, bulk update, spam)
 # ============================================================
 
 @mcp.tool()
@@ -2514,7 +2514,7 @@ def compare_periods(
 
     Args:
         days: Window length on each side (default 30 = roughly one cycle).
-            Cap: 365 (don't ask for "5-year delta" — likely a typo).
+            Cap: 365 (don't ask for "5-year delta", likely a typo).
         account_id: Auto-resolves if omitted.
 
     Returns: A breakdown showing current vs previous totals, % deltas,
@@ -2522,7 +2522,7 @@ def compare_periods(
 
     Implementation: pulls call data for both windows in one tool call.
     Tracker counts use current-snapshot for both periods (CallRail doesn't
-    expose historical tracker counts) — only minute deltas reflect actual
+    expose historical tracker counts); only minute deltas reflect actual
     period-over-period change.
     """
     # Use the shared validator (handles bool rejection, string coercion,
@@ -2531,7 +2531,7 @@ def compare_periods(
     if not ok:
         return _err_msg(msg)
     # Coerce BEFORE the cap check. `_validate_window` coerces internally
-    # but only returns (ok, msg) — the previous `isinstance(days, int)`
+    # but only returns (ok, msg). The previous `isinstance(days, int)`
     # guard rejected a perfectly valid days="30" from loose-JSON MCP
     # clients with the misleading message "exceeds cap of 365".
     days_int = _coerce_days_int(days)
@@ -2561,7 +2561,7 @@ def compare_periods(
 
         # Current window: today minus N days → today.
         # Previous window: today minus 2N days → today minus N days - 1.
-        # CallRail's start_date/end_date are BOTH inclusive — without the
+        # CallRail's start_date/end_date are BOTH inclusive. Without the
         # `-timedelta(days=1)` on prev_end, the boundary day would appear
         # in both windows and double-count (1 day of overlap on N=30 = 3.3%
         # error in deltas).
@@ -2584,7 +2584,7 @@ def compare_periods(
             """Return {total_minutes, total_calls, by_company: {cid: {minutes, calls, name}}}.
 
             On per-company API failure: surface in `partial_failures`
-            (not silent — agency totals would be misleading otherwise).
+            (not silent; agency totals would be misleading otherwise).
             """
             agg_by_company: dict[str, dict[str, Any]] = {}
             for c in active_companies:
@@ -2707,7 +2707,7 @@ def compare_periods(
 _BULK_UPDATE_CAP = 500
 
 # Cap on spam_detector auto_tag operations. 1000 calls × 2 round-trips
-# (GET fresh tags + PUT merged) × ~100ms ≈ 3 minutes — close to common
+# (GET fresh tags + PUT merged) × ~100ms ≈ 3 minutes, close to common
 # MCP transport timeouts. Beyond this we slice and surface truncation.
 _SPAM_AUTO_TAG_CAP = 1000
 
@@ -2733,15 +2733,15 @@ def bulk_update_calls(
     "add a note to every call from a specific landing page". Replaces
     dozens of sequential `update_call` invocations with one tool call.
 
-    **Safety:** `dry_run=True` by default — returns a preview of which
+    **Safety:** `dry_run=True` by default. It returns a preview of which
     calls WOULD be updated without actually writing. Pass `dry_run=False`
     to commit. Hard cap of 500 calls per invocation to prevent runaway
     bulk operations.
 
     Args:
-        company_id, days: filter — same semantics as `list_calls`. At least
+        company_id, days: filter (same semantics as `list_calls`). At least
             one filter must be provided to avoid "update everything ever".
-        answer_status: server-side filter — 'answered', 'missed', or
+        answer_status: server-side filter. One of 'answered', 'missed', or
             'voicemail'.
         answered: DEPRECATED alias ('true' -> answered, 'false' -> missed).
             Before v1.2.0 this was forwarded as an `answered` query param
@@ -2773,7 +2773,7 @@ def bulk_update_calls(
     extra GET.
     """
     # Require at least one filter to avoid "update every call ever".
-    # Coerce `days` BEFORE the < comparison — a loose-JSON MCP client
+    # Coerce `days` BEFORE the < comparison: a loose-JSON MCP client
     # sending days="7" previously raised an uncaught TypeError here
     # (str < int), crashing the tool reply. Same bug class as the
     # v0.4.7 _date_window and v0.5.3 spam_detector cap fixes.
@@ -2975,11 +2975,11 @@ def spam_detector(
     Args:
         company_id: Restrict to one company (recommended).
         days: Lookback window (1-90; 90 is hard-capped to avoid memory
-            blowup on high-volume clients — full call list is materialized
+            blowup on high-volume clients: full call list is materialized
             for scoring before truncating the response).
         auto_tag: If True, ADD `tag_name` to each likely-spam call after
             the scan. Default False (preview only). Note: we deliberately
-            do NOT mark calls as spam=True automatically — CallRail
+            do NOT mark calls as spam=True automatically: CallRail
             HIDES spam-flagged calls from default GET endpoints, so
             self-reviewing them later becomes painful. Tag first, manually
             spam-flag if confirmed.
@@ -3149,13 +3149,13 @@ def spam_detector(
 
 
 # ============================================================
-# v0.6.0 — API parity tools (Companies CRUD, Users CRUD, single-record
+# v0.6.0: API parity tools (Companies CRUD, Users CRUD, single-record
 # GETs for forms / text-messages, read-only webhooks)
 # ============================================================
 
 # CallRail v3 docs (where accessible) and live response shapes confirm
 # these role values. CallRail also has 'manager' / 'analyst' on some
-# plans; rejecting unknown values would be too strict — pass through
+# plans; rejecting unknown values would be too strict. Pass through
 # but document the common ones.
 VALID_USER_ROLES: tuple[str, ...] = ("admin", "manager", "reporting", "analyst")
 
@@ -3167,7 +3167,7 @@ _MAX_USER_NAME_LEN = 100
 # prevent absurdly-long URL paths before CallRail rejects them.
 _MAX_ID_LEN = 256
 
-# Loose email regex — RFC 5322 is famously hard to parse correctly,
+# Loose email regex: RFC 5322 is famously hard to parse correctly,
 # this is just a "looks plausible" check before burning an API call.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -3189,7 +3189,7 @@ def get_company(company_id: str, account_id: str | None = None) -> str:
         account_id: Auto-resolves if omitted.
 
     Note: Returns the disabled record (with `status: "disabled"`,
-    `disabled_at` timestamp) for soft-deleted companies — NOT 404.
+    `disabled_at` timestamp) for soft-deleted companies, NOT 404.
     Check the `status` field if you need to distinguish.
     """
     ok, msg = _require_non_empty(company_id, "company_id")
@@ -3220,7 +3220,7 @@ def create_company(
     """Create a new company (client) under the account.
 
     Useful for new-client onboarding. CallRail bills per number, not per
-    company — creating a company is free; provisioning trackers under
+    company: creating a company is free; provisioning trackers under
     it is what costs money (see `create_tracker`).
 
     Args:
@@ -3241,7 +3241,7 @@ def create_company(
 
     Note: Optional booleans default to None (inherit account-level
     defaults) rather than False. Sending `False` for a paid feature on
-    an account that has it enabled would actively DISABLE it — almost
+    an account that has it enabled would actively DISABLE it, almost
     never the caller's intent on a fresh-create.
     """
     ok, msg = _require_non_empty(name, "name")
@@ -3286,7 +3286,7 @@ def update_company(
     account_id: str | None = None,
 ) -> str:
     """Update mutable settings on a company. Pass None to leave a field
-    unchanged — only fields with explicit values are sent in the PUT
+    unchanged; only fields with explicit values are sent in the PUT
     body.
 
     CRITICAL: Any boolean toggle you set will OVERRIDE current state.
@@ -3297,7 +3297,7 @@ def update_company(
     feature). Be deliberate with bool args.
 
     Empty-string `name` / `time_zone` are rejected (almost always a
-    mistake — pass None to leave them alone).
+    mistake; pass None to leave them alone).
 
     Args:
         company_id: 'COM...' id.
@@ -3393,7 +3393,7 @@ def get_user(user_id: str, account_id: str | None = None) -> str:
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
-        JSON string with the user object — id, email, first_name,
+        JSON string with the user object: id, email, first_name,
         last_name, role ('admin' | 'manager' | 'reporting'),
         accepted_at (null if invitation pending), time_zone, and
         `company_ids[]` the user can access.
@@ -3614,7 +3614,7 @@ def get_form_submission(submission_id: str, account_id: str | None = None) -> st
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
-        JSON string with the form submission — submitted_at, customer
+        JSON string with the form submission: submitted_at, customer
         details, source/UTM attribution, landing page URL, referrer,
         and `form_data` dict keyed by form field name.
     """
@@ -3667,15 +3667,16 @@ def get_text_message(conversation_id: str, account_id: str | None = None) -> str
 
 
 # ============================================================
-# v0.7.0 — Final API parity push (the safe, account-permission-allowed
-# subset). SMS send + webhook integration CRUD are NOT shipped — they
+# v0.7.0: Final API parity push (the safe, account-permission-allowed
+# subset). SMS send + webhook integration CRUD are NOT shipped: they
 # return 403 on standard CallRail accounts (need separately-enabled
-# A2P SMS / Integration Admin permissions). See CLAUDE.md "API
+# A2P SMS / Integration Admin permissions). See DEVELOPMENT.md "API
 # coverage limits" for details.
 # ============================================================
 
 # Common alert types for notifications. Discovered via empirical POST
-# probing — incomplete; CallRail likely supports more (per-plan).
+# probing. The list is incomplete; CallRail likely supports more
+# (per-plan).
 VALID_NOTIFICATION_ALERT_TYPES: tuple[str, ...] = (
     "all_calls",
     "first_time_callers",
@@ -3723,7 +3724,7 @@ def list_integrations(
     Facebook, Slack, Webhooks, etc.).
 
     Args:
-        company_id: 'COM...' id. **Required** — the integrations endpoint
+        company_id: 'COM...' id. **Required**: the integrations endpoint
             returns 400 without it (account-level listing isn't supported).
         per_page: Page size (max 250).
         page: 1-indexed.
@@ -4053,7 +4054,7 @@ def update_notification(
     account_id: str | None = None,
 ) -> str:
     """Update a notification rule. Pass None to leave a field
-    unchanged — only fields with explicit values are sent in the PUT
+    unchanged; only fields with explicit values are sent in the PUT
     body.
 
     Notification rules trigger emails / desktop pushes / SMS when calls
@@ -4067,7 +4068,7 @@ def update_notification(
         alert_type: Common values: 'all_calls', 'first_time_callers',
             'missed_calls', 'voicemails', 'all_texts',
             'first_time_texters', 'all_form_submissions' (same set as
-            `create_notification`). Plan-specific — unknown values warn
+            `create_notification`). Plan-specific: unknown values warn
             but do not reject.
         send_email: Send email notification.
         send_desktop: Send desktop browser push.
@@ -4134,7 +4135,7 @@ def update_notification(
 
 @mcp.tool()
 def delete_notification(notification_id: str, account_id: str | None = None) -> str:
-    """Delete a notification rule. The rule is gone — to keep but mute
+    """Delete a notification rule. The rule is gone. To keep but mute
     it, prefer `update_notification(send_email=False, send_desktop=False,
     send_push=False)`.
 
@@ -4204,7 +4205,7 @@ def list_notifications(
 
 
 # ============================================================
-# v1.1.0 — Leads, SMS threads, server-side analytics, page views.
+# v1.1.0: Leads, SMS threads, server-side analytics, page views.
 # All endpoint shapes live-verified against a production account
 # 2026-07-03 (read-only probes; see CHANGELOG).
 # ============================================================
@@ -4241,7 +4242,7 @@ def list_leads(
 ) -> str:
     """List leads (unique people) across calls, forms, and texts.
 
-    A lead is CallRail's deduplicated person record — one entry per
+    A lead is CallRail's deduplicated person record: one entry per
     customer regardless of how many times they called / submitted /
     texted. Use `get_lead_timeline` for a lead's full cross-channel
     history.
@@ -4274,7 +4275,7 @@ def get_lead_timeline(
     per_page: int = 100,
     page: int = 1,
 ) -> str:
-    """Get a lead's full cross-channel activity timeline — every call,
+    """Get a lead's full cross-channel activity timeline: every call,
     form submission, and text thread from that person in one response,
     with first-touch/last-touch attribution.
 
@@ -4314,7 +4315,7 @@ def list_sms_threads(
 ) -> str:
     """List SMS threads. Unlike `list_text_messages` (conversation
     transcripts), threads carry the lead-management surface: `notes`,
-    `value`, `tags`, `lead_qualification`, `state` — and are UPDATABLE
+    `value`, `tags`, `lead_qualification`, `state`. They are also UPDATABLE
     via `update_sms_thread`.
 
     Args:
@@ -4375,7 +4376,7 @@ def update_sms_thread(
     lead_qualification: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Update an SMS thread's lead-management fields — the texting
+    """Update an SMS thread's lead-management fields, the texting
     equivalent of `update_call`. Closes the gap where texting leads
     couldn't be tagged / noted / qualified via API.
 
@@ -4455,7 +4456,7 @@ def call_stats(
 ) -> str:
     """Server-side call aggregation via CallRail's /calls/summary.json.
 
-    One request instead of paginating every call — prefer this over
+    One request instead of paginating every call. Prefer this over
     `call_summary` (which fetches and counts calls client-side) when
     you only need grouped totals. `call_summary` remains useful for
     metrics this endpoint doesn't expose (first-time vs repeat split,
@@ -4610,7 +4611,7 @@ def get_call_page_views(
     per_page: int = 100,
     page: int = 1,
 ) -> str:
-    """Get the visitor's page-view history behind a call — which pages
+    """Get the visitor's page-view history behind a call: which pages
     they browsed (with timestamps) before and around dialing. Pairs
     with `call_eligibility_check` for conversion debugging: shows the
     actual session journey that led to the call.
@@ -4642,7 +4643,7 @@ def main() -> None:
     """CLI entry point for stdio transport.
 
     Honors CALLRAIL_LOG_LEVEL (default: WARNING). Library callers who
-    `import callrail_mcp.server` are unaffected by this — only the
+    `import callrail_mcp.server` are unaffected by this; only the
     standalone server configures logging.
     """
     logging.basicConfig(

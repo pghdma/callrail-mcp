@@ -1,7 +1,7 @@
 """All-tool adversarial input fuzz (v1.1.1 audit).
 
 Invariant: EVERY MCP tool, called with garbage in ANY single parameter,
-must return a JSON-parseable string envelope — never raise. This is the
+must return a JSON-parseable string envelope, never raise. This is the
 project's core error contract (tool bodies catch CallRailError and
 validation returns _err_msg envelopes; a raw exception crashes the MCP
 reply frame).
@@ -101,10 +101,10 @@ def test_tool_never_raises_on_garbage_input(
                 kwargs[param] = garbage
                 try:
                     out = fn(**kwargs)
-                except Exception as e:  # noqa: BLE001 — the point of the test
+                except Exception as e:  # noqa: BLE001 (the point of the test)
                     pytest.fail(
                         f"{tool_name}({param}={garbage!r}) raised "
-                        f"{type(e).__name__}: {e} — tools must return "
+                        f"{type(e).__name__}: {e}; tools must return "
                         f"error envelopes, never raise."
                     )
                 assert isinstance(out, str), (

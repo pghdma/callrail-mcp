@@ -9,7 +9,7 @@ Repo: https://github.com/pghdma/callrail-mcp. MIT, public.
 - **Source:** `src/callrail_mcp/` (`client.py`, `server.py`, `__init__.py`, `__main__.py`)
 - **Tests:** `tests/`: 408 passing, uses `responses` + `hypothesis`. No real API hits in CI.
 - **Local dev venv:** `.venv/` (created via `python -m venv .venv && pip install -e ".[dev]"`).
-- **pipx install:** `/Users/s/.local/bin/callrail-mcp` → points to `~/.local/pipx/venvs/callrail-mcp/`.
+- **pipx install:** `~/.local/bin/callrail-mcp` → points to `~/.local/pipx/venvs/callrail-mcp/`.
 - **API key:** `~/.config/callrail/api-key.txt` (mode 600). Also honored: `CALLRAIL_API_KEY` env, `CALLRAIL_API_KEY_FILE` env.
 
 ## Release flow
@@ -110,7 +110,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.2.0
+## Current version: 1.2.1
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0`: initial 12 read tools
@@ -142,14 +142,14 @@ See `CHANGELOG.md` for full history. Highlights:
 
 ## Future work (deferred, see "API coverage limits" above)
 
-Out of scope for v1.0.0; will work on if/when:
+Still out of scope as of v1.2.1; will work on if/when:
 1. SMS send (when account gets A2P SMS API permission)
 2. Webhook integration CRUD (when account gets Integration-Admin permission)
 3. Outbound Caller IDs (if CallRail exposes via API)
 4. Custom Fields CRUD (if CallRail exposes via API)
 5. Do-not-call list management (if CallRail exposes via API)
 6. Call flows / IVR builder (if CallRail exposes via API)
-6. Toll-free minute pricing differentiation in `usage_summary`
-7. `export_calls_to_csv` for client-deliverable reporting
+7. Toll-free minute pricing differentiation in `usage_summary`
+8. `export_calls_to_csv` for client-deliverable reporting
 
 Not yet started.

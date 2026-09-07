@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-07
+
+Presentation and maintenance release. No behavior changes: all 408 tests,
+`mypy --strict`, `ruff`, and `bandit` pass unchanged, and the tool surface
+is still 57 tools on both MCP SDK majors.
+
+### Changed: house style applied to shipped text
+
+- **Em dashes and en dashes removed from every tracked file** (184
+  occurrences across `server.py`, `client.py`, the test suite, and the
+  PR template). This is user-visible, not merely cosmetic: the
+  docstrings on `@mcp.tool()` functions are shipped verbatim as the
+  tool descriptions that Claude, Cursor, and every other MCP client
+  displays, so the punctuation was reaching end users. Each dash was
+  replaced with the punctuation that fit the sentence rather than one
+  mechanical substitution, and no technical claim, bound, version tag,
+  or severity marker was altered.
+- Repointed five stale `CLAUDE.md` references in this changelog, plus
+  one in `server.py`, to `DEVELOPMENT.md`, the file's name since v1.2.0.
+  They had been dangling pointers to a path no longer in the repository.
+
+### Changed: CI
+
+- `actions/checkout` and `actions/setup-python` bumped from v6 to v7.
+  Applied directly rather than by merging the open Dependabot pull
+  requests, whose branches predated the history rewrite and would have
+  reintroduced the superseded commits along with the version bump.
+
 ## [1.2.0] - 2026-09-07
 
 Audit release. Every item below was confirmed by executing a reproduction
@@ -111,7 +139,7 @@ or by probing the live CallRail API, not by reading code alone.
 ### Fixed: packaging and CI
 
 - **sdist no longer sweeps in local working-copy state.** hatchling's
-  default file selection pulled `.claude/` and `.hypothesis/` into
+  default file selection pulled local editor state and test caches into
   source distributions built from a working copy. The sdist now has an
   explicit include list. (The published 1.1.3 sdist was built by CI
   from a clean checkout and was not affected.)
@@ -247,8 +275,8 @@ the class went unseen.
   that raised TypeError on string/None pages.
 - `_clean_tag_list`: non-list input returns [] with a warning
   (mirrors `_tag_names_from`; previously iterated ints → TypeError).
-- `update_call` / `update_form_submission` / `create_form_submission`
- , `tags` type-checked as list before `len()`.
+- `update_call` / `update_form_submission` / `create_form_submission`:
+  `tags` type-checked as list before `len()`.
 - `call_eligibility_check`: threshold coerced before the `< 0`
   comparison (None/"60" previously raised TypeError).
 
@@ -293,8 +321,8 @@ account on 2026-07-03 (read-only probes) before implementation.
   person records + full cross-channel history (calls, forms, texts)
   per lead with first/last-touch attribution. Replaces the manual
   "search calls by number + search forms by email" reconstruction.
-- **`list_sms_threads`** / **`get_sms_thread`** / **`update_sms_thread`**
- . SMS-thread lead management. `update_sms_thread` closes the write
+- **`list_sms_threads`** / **`get_sms_thread`** / **`update_sms_thread`**:
+  SMS-thread lead management. `update_sms_thread` closes the write
   gap where texting leads couldn't be tagged / noted / qualified via
   API (notes, value, tags with `append_tags`, lead_qualification).
 - **`call_stats`**: server-side aggregation via `/calls/summary.json`
@@ -334,7 +362,7 @@ and our fail-fast validation had become over-restrictive:
   section (CallRail shipped a hosted OAuth MCP server ~30 tools;
   this project stays pip-installable, local, 59 tools, with agency
   cost-attribution tooling the official one lacks).
-- CLAUDE.md: API-coverage notes refreshed for July 2026 (outbound
+- DEVELOPMENT.md: API-coverage notes refreshed for July 2026 (outbound
   caller IDs now documented-but-403, MMS send shipped May 5 but still
   needs A2P registration, message flows + integration filters
   documented-but-403).
@@ -451,7 +479,7 @@ corrected tool count; the registry rejects re-publishing a version.)
 
 This release locks the feature surface at **49 tools, ~85% of the
 CallRail REST API v3**. The remaining 15% is documented as out-of-scope
-in the README and CLAUDE.md (either CallRail-account-permission-gated
+in the README and DEVELOPMENT.md (either CallRail-account-permission-gated
 or UI-only on standard plans). No code changes vs v0.7.0, version
 bump only, plus README cleanup for the PyPI launch.
 
@@ -460,8 +488,8 @@ bump only, plus README cleanup for the PyPI launch.
 **Blocked by CallRail account permissions** (returns 403 for standard
 accounts; verified live 2026-04-24):
 - Send SMS (`POST /text-messages.json`), needs A2P SMS registration
-- Webhook integration CRUD (`POST /integrations.json` with `type=Webhook`)
- , needs Integration-Admin permission
+- Webhook integration CRUD (`POST /integrations.json` with `type=Webhook`),
+  needs Integration-Admin permission
 
 **Not exposed by CallRail's REST API** (UI-only on standard plans):
 - Outbound Caller IDs verification
@@ -495,7 +523,7 @@ period:
 API surface coverage now ~85% (up from 75% in v0.6.x). The remaining
 ~15% is either deliberately not exposed by CallRail (UI-only) or
 gated behind account permissions our standard API key doesn't have
-(see CLAUDE.md "API coverage limits").
+(see DEVELOPMENT.md "API coverage limits").
 
 #### Tools shipped
 - **`get_tag(tag_id)`**: single tag detail. Completes tag CRUD.
@@ -507,8 +535,8 @@ gated behind account permissions our standard API key doesn't have
   landing_page_url, ...)`**, manually create a form submission for
   backfilling offline leads (walk-ins, paper forms, etc.). All 3 of
   referrer/referring_url/landing_page_url required by CallRail.
-- **`create_outbound_call(from_number, to_number, confirm_dialing=False)`**
- , place an outbound call. **Mirrors `create_tracker`'s safety
+- **`create_outbound_call(from_number, to_number, confirm_dialing=False)`**:
+  place an outbound call. **Mirrors `create_tracker`'s safety
   pattern**: requires `confirm_dialing=True` because it actually places
   a real phone call (legal implications + minute cost).
 - **`list_notifications`** / **`create_notification`** /
@@ -531,7 +559,7 @@ CallRail does NOT expose the following via API (UI-only):
 - Custom Fields CRUD (only readable as part of call/form responses)
 - Do Not Call list management
 
-CLAUDE.md now has an "API coverage limits" section documenting all
+DEVELOPMENT.md now has an "API coverage limits" section documenting all
 of the above so future contributors don't waste time re-discovering.
 
 ### Added: tests
@@ -876,8 +904,8 @@ lens and caught one HIGH-severity defect.
 
 #### HIGH, discovered in round 14 (final lens)
 - **`_date_window` crashed on string `days`**. `_validate_window` coerced
-  string `days` to int locally (added v0.4.3) but only returned `(ok, msg)`
- , the coerced value was thrown away. `_date_window` then received the
+  string `days` to int locally (added v0.4.3) but only returned `(ok, msg)`;
+  the coerced value was thrown away. `_date_window` then received the
   original string and raised `TypeError: '>' not supported between str and
   int`. Reachable via every tool accepting `days` (list_calls, call_summary,
   usage_summary, list_form_submissions, list_text_messages,
@@ -887,7 +915,7 @@ lens and caught one HIGH-severity defect.
   test asserts `list_calls(days="7")` doesn't crash.
 
 ### Documentation drift (rounds 13 + 14 findings)
-- CLAUDE.md stale by 5 versions; now accurate through v0.4.7 and lists
+- DEVELOPMENT.md stale by 5 versions; now accurate through v0.4.7 and lists
   ~20 validation guards added across versions.
 - `usage_summary` docstring now documents the `partial_failures[]` schema
   including the v0.4.6 `partial_calls_before_failure` / `partial_minutes_
@@ -1236,8 +1264,8 @@ surfaced 1 CRITICAL + 1 HIGH + 4 MEDIUM bugs. All fixed.
 ### Considered + rejected
 - The audit suggested removing `bool(gclid)` from the `is_google` source
   heuristic, claiming it tautologically tracks `has_gclid`. Rejected:
-  gclid stands for "Google Click ID" and is only minted by Google Ads
- , its presence is honest signal that the call originated from Google,
+  gclid stands for "Google Click ID" and is only minted by Google Ads,
+  so its presence is honest signal that the call originated from Google,
   even when CallRail's `source_name` is generic ("Website Pool" for
   DNI sessions). Kept as-is with extended comment explaining why.
 
@@ -1268,8 +1296,8 @@ add real agency-level utility.
   my CallRail budget", quarterly reviews, upsell / renegotiation
   signals. Pricing constants are editable in `server.py` for other plans.
 
-- **`call_eligibility_check(call_id, google_ads_min_duration_seconds=60)`**
- , audits whether a specific call is/was eligible to count as a
+- **`call_eligibility_check(call_id, google_ads_min_duration_seconds=60)`**:
+  audits whether a specific call is/was eligible to count as a
   Google Ads conversion. Checks: `gclid` presence, answered status,
   duration vs. Google's threshold, source (Google vs Bing/GMB/organic).
   Returns verdict + per-check pass/fail + targeted remediation text

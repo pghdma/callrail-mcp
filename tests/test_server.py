@@ -12,7 +12,7 @@ from callrail_mcp.server import (
     VALID_SOURCE_TYPES,
     _clamp_per_page,
     _clean_tag_list,
-    _date_window,  # noqa: F401  — used by v0.4.7 regression test
+    _date_window,  # noqa: F401 (used by v0.4.7 regression test)
     _require_non_empty,
     _validate_area_code,
     _validate_date,
@@ -308,7 +308,7 @@ def test_get_tracker_rejects_empty_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ============================================================
-# create_tracker validation — billing + required + format + conflicts
+# create_tracker validation: billing + required + format + conflicts
 # ============================================================
 
 def _create_call(monkeypatch: pytest.MonkeyPatch, **overrides) -> dict:
@@ -445,7 +445,7 @@ def test_create_tracker_session_rejects_huge_pool(monkeypatch: pytest.MonkeyPatc
 
 
 # ============================================================
-# update_tracker validation — including C1 (greeting_text alone)
+# update_tracker validation, including C1 (greeting_text alone)
 # ============================================================
 
 def test_update_tracker_rejects_empty_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -756,7 +756,7 @@ def test_list_trackers_with_status_filter(server_with_mock_client) -> None:
 
 
 # ============================================================
-# v0.4.0 — usage_summary
+# v0.4.0: usage_summary
 # ============================================================
 
 def test_is_toll_free_helper() -> None:
@@ -792,7 +792,7 @@ def test_usage_summary_aggregates_correctly(server_with_mock_client) -> None:
         status=200,
     )
     # Big Client trackers (4 numbers in a session pool + 1 GMB local)
-    # NOTE: total_pages=1 required after v0.4.2 paginate fix — without it
+    # NOTE: total_pages=1 required after v0.4.2 paginate fix; without it
     # the iterator keeps fetching until empty page or max_pages.
     responses.add(
         responses.GET,
@@ -856,7 +856,7 @@ def test_usage_summary_rejects_swapped_dates(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ============================================================
-# v0.4.0 — call_eligibility_check
+# v0.4.0: call_eligibility_check
 # ============================================================
 
 def test_call_eligibility_check_rejects_empty_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1121,7 +1121,7 @@ def test_call_eligibility_check_requires_CAL_prefix(monkeypatch: pytest.MonkeyPa
 
 
 # ============================================================
-# v0.4.2 — ID validation across all tools (audit pass 6 findings)
+# v0.4.2: ID validation across all tools (audit pass 6 findings)
 # ============================================================
 
 @pytest.mark.parametrize("tool_name,kwargs,id_field", [
@@ -1191,7 +1191,7 @@ def test_v042_search_calls_rejects_zero_days(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ============================================================
-# v0.4.2 — Client-level fixes (POST no-retry, negative retry-after, paginate)
+# v0.4.2: Client-level fixes (POST no-retry, negative retry-after, paginate)
 # ============================================================
 
 def test_v042_clamp_delay_floors_negative() -> None:
@@ -1214,12 +1214,12 @@ def test_v042_post_does_NOT_retry_on_5xx(monkeypatch: pytest.MonkeyPatch) -> Non
     ($3/mo each). Now POST fails fast on 5xx instead of retrying.
 
     NOTE (v1.1.3 mutation-testing find): this test previously used the
-    max_retries=0 fixture, which disables ALL retries — so it passed
+    max_retries=0 fixture, which disables ALL retries, so it passed
     even with POST added to the idempotent-retry set (vacuous). It must
     run with retries ENABLED to prove POST specifically is excluded."""
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = CallRailClient(max_retries=2)
-    # Single 502 — pre-fix this would have been retried, potentially
+    # Single 502: pre-fix this would have been retried, potentially
     # creating multiple trackers if CallRail processed each retry.
     responses.add(
         responses.GET,
@@ -1269,7 +1269,7 @@ def test_v042_get_still_retries_on_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ============================================================
-# v0.4.3 — Meta-audit fixes
+# v0.4.3: Meta-audit fixes
 # ============================================================
 
 def test_v043_is_toll_free_skips_non_NANP() -> None:
@@ -1280,12 +1280,12 @@ def test_v043_is_toll_free_skips_non_NANP() -> None:
     # NANP toll-free still detected.
     assert _is_toll_free("+18005551234") is True
     assert _is_toll_free("18005551234") is True
-    # Shortcodes (5 digits) — not NANP, return False.
+    # Shortcodes (5 digits): not NANP, return False.
     assert _is_toll_free("55555") is False
     assert _is_toll_free("12345") is False
-    # International numbers (UK, +44...) — not NANP, return False.
+    # International numbers (UK, +44...): not NANP, return False.
     assert _is_toll_free("+44123456789012") is False
-    # NANP local — still False (as before).
+    # NANP local: still False (as before).
     assert _is_toll_free("+14125551234") is False
 
 
@@ -1362,7 +1362,7 @@ def test_v043_cost_shares_sum_to_agency_total(server_with_mock_client) -> None:
 
 
 # ============================================================
-# v0.4.3 — Happy-path tests for previously-uncovered tools
+# v0.4.3: Happy-path tests for previously-uncovered tools
 # (Finding 10.1: 11+ tools had ZERO test coverage)
 # ============================================================
 
@@ -1690,7 +1690,7 @@ def test_search_calls_caps_match_count(server_with_mock_client) -> None:
 
 
 # ============================================================
-# v0.4.4 — Audit pass 10 fixes (Unicode, is_google, extension parsing,
+# v0.4.4: Audit pass 10 fixes (Unicode, is_google, extension parsing,
 #          length caps, tag_id format, float days)
 # ============================================================
 
@@ -1832,7 +1832,7 @@ def test_v044_call_eligibility_uses_source_slug(monkeypatch: pytest.MonkeyPatch)
         assert out["checks"]["is_google_source"] is False
         assert out["call_facts"]["source"] == "bing_paid"
         # F8 fix (audit pass 11): make sure `source` is actually in the
-        # fields= URL query — if a refactor drops it, this test would
+        # fields= URL query; if a refactor drops it, this test would
         # silently pass on the mock alone otherwise.
         assert "source" in rsps.calls[1].request.url
 
@@ -1871,7 +1871,7 @@ def test_v044_err_handles_bytes_body() -> None:
 
 
 # ============================================================
-# v0.4.5 — Audit pass 11 fixes
+# v0.4.5: Audit pass 11 fixes
 # ============================================================
 
 @responses.activate
@@ -1925,7 +1925,7 @@ def test_v045_call_eligibility_bare_google_source(server_with_mock_client) -> No
 
 
 # ============================================================
-# v0.4.6 — Audit pass 12 fixes
+# v0.4.6: Audit pass 12 fixes
 # ============================================================
 
 @responses.activate
@@ -1933,7 +1933,7 @@ def test_v046_partial_failure_surfaces_accumulated_data(
     server_with_mock_client,
 ) -> None:
     """v0.4.6 fix (F1, HIGH): when a company's call pagination fails
-    mid-flight, the partial accumulator was silently dropped — agency
+    mid-flight, the partial accumulator was silently dropped: agency
     total under-reported with no way for the user to know how much was
     lost. Now reported in partial_failures."""
     responses.add(
@@ -1972,7 +1972,7 @@ def test_v046_partial_failure_surfaces_accumulated_data(
     out = json.loads(server_mod.usage_summary(days=30))
     assert len(out["partial_failures"]) == 1
     pf = out["partial_failures"][0]
-    # Accumulated data is now visible — pre-fix this was 0.
+    # Accumulated data is now visible. Pre-fix this was 0.
     assert pf["partial_calls_before_failure"] == 5
     assert pf["partial_minutes_before_failure"] == 5.0
     assert pf["partial_local_numbers"] == 1
@@ -2003,7 +2003,7 @@ def test_v046_validate_window_rejects_bool() -> None:
 
 
 # ============================================================
-# v0.5.0 — compare_periods, bulk_update_calls, spam_detector
+# v0.5.0: compare_periods, bulk_update_calls, spam_detector
 # ============================================================
 
 def test_v050_compare_periods_rejects_invalid_days(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2096,7 +2096,7 @@ def test_v050_bulk_update_dry_run(server_with_mock_client) -> None:
     assert out["matched"] == 2
     assert len(out["would_update_calls"]) == 2
     assert out["set_fields"]["tags_add"] == ["low_priority"]
-    # Should NOT have called PUT — verify by counting requests.
+    # Should NOT have called PUT. Verify by counting requests.
     put_calls = [c for c in responses.calls if c.request.method == "PUT"]
     assert len(put_calls) == 0
 
@@ -2249,7 +2249,7 @@ def test_v050_bulk_update_surfaces_truncation(server_with_mock_client) -> None:
         json={"accounts": [{"id": "ACC1"}]},
         status=200,
     )
-    # Return 501 calls across 2 pages — bulk cap is 500, so the 501st
+    # Return 501 calls across 2 pages. Bulk cap is 500, so the 501st
     # triggers truncated_at_cap=True.
     responses.add(
         responses.GET,
@@ -2301,7 +2301,7 @@ def test_v052_spam_detector_caps_days_at_90(monkeypatch: pytest.MonkeyPatch) -> 
     assert out["error"] is True
     assert "90" in out["message"]
     # Boundary: 90 is allowed (would proceed to API call which fails
-    # with no mock — we're only checking validation here).
+    # with no mock; we're only checking validation here).
     out = json.loads(server_mod.spam_detector(days=90))
     # Should NOT be a validation error (would be a CallRail API error
     # because no mock; but `error` could be True with status=500 etc.).
@@ -2349,11 +2349,11 @@ def test_v051_tag_names_from_filters_malformed() -> None:
     # Mix of dict-with-name, dict-without-name, string, int, None.
     assert _tag_names_from([
         {"id": 1, "name": "lead"},
-        {"id": 2},  # no name — drop
+        {"id": 2},  # no name, so drop
         "hot",
-        42,         # non-string — drop
+        42,         # non-string, so drop
         None,
-        {"name": ""},  # empty name — drop
+        {"name": ""},  # empty name, so drop
         {"name": "vip"},
     ]) == ["lead", "hot", "vip"]
 
@@ -2393,7 +2393,7 @@ def test_v051_spam_detector_handles_malformed_tags(server_with_mock_client) -> N
         company_id="COM1", days=30, auto_tag=True,
     ))
     assert out["tagged_count"] == 1
-    # The PUT body should NOT contain None — only the real string tags
+    # The PUT body should NOT contain None, only the real string tags
     # plus the new auto_detected_spam tag.
     put_body = json.loads(
         next(c for c in responses.calls if c.request.method == "PUT").request.body
@@ -2490,7 +2490,7 @@ def test_v050_compare_periods_no_overlap() -> None:
 
     v1.1.3 rewrite (mutation-testing find): the original test
     re-implemented the window arithmetic locally and asserted on its own
-    copy — it never called compare_periods, so a regression in the real
+    copy; it never called compare_periods, so a regression in the real
     code could never fail it. Now asserts on the ACTUAL window
     boundaries the tool returns.
     """
@@ -2528,7 +2528,7 @@ def test_v050_date_window_uses_timezone() -> None:
 
 
 # ============================================================
-# v0.6.0 — Companies CRUD, Users CRUD, get_form_submission,
+# v0.6.0: Companies CRUD, Users CRUD, get_form_submission,
 #          get_text_message, list_webhooks, get_webhook
 # ============================================================
 
@@ -2580,7 +2580,7 @@ def test_v060_create_company_happy(server_with_mock_client) -> None:
     assert body["name"] == "Acme"
     assert body["time_zone"] == "America/New_York"
     # v0.6.1 audit fix: optional bools are no longer sent unless caller
-    # explicitly specified — would otherwise disable paid features that
+    # explicitly specified. They would otherwise disable paid features that
     # are enabled at the account level.
     assert "callscore_enabled" not in body
     assert "lead_scoring_enabled" not in body
@@ -2788,7 +2788,7 @@ def test_v061_update_user_empty_email_says_required(
 
 
 # ============================================================
-# v0.7.0 — Final API parity (the safe, account-perm-allowed subset)
+# v0.7.0: Final API parity (the safe, account-perm-allowed subset)
 # ============================================================
 
 @responses.activate
@@ -2908,7 +2908,7 @@ def test_v070_create_form_submission_happy(server_with_mock_client) -> None:
 def test_v070_create_outbound_call_requires_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mirror create_tracker's confirm_billing pattern — outbound calls
+    """Mirror create_tracker's confirm_billing pattern: outbound calls
     are dangerous (real dialing + minute cost + legal implications)."""
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = None
@@ -3153,7 +3153,7 @@ def test_v047_list_calls_accepts_string_days(monkeypatch: pytest.MonkeyPatch) ->
             json={"calls": [], "total_pages": 1},
             status=200,
         )
-        # Passing days as a string — pre-v0.4.7 this was an uncaught TypeError.
+        # Passing days as a string: pre-v0.4.7 this was an uncaught TypeError.
         # Note: live MCP clients almost always get per_page/days coerced by
         # FastMCP before dispatch, but in-process callers can send strings.
         out = json.loads(server_mod.list_calls(days="7"))  # type: ignore[arg-type]
@@ -3242,7 +3242,7 @@ def test_v043_paginate_handles_missing_total_pages(
         json={"calls": [{"id": f"CAL_{i}"} for i in range(100, 150)]},
         status=200,
     )
-    # Page 3: empty — terminator.
+    # Page 3: empty (terminator).
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/calls.json",
@@ -3364,7 +3364,7 @@ def test_v105_paginate_coerces_string_total_pages(
     server_with_mock_client,
 ) -> None:
     """F1: a malformed string total_pages ("1") must not raise TypeError
-    through the generator — coerce or fall back to stop-on-empty-page."""
+    through the generator; coerce or fall back to stop-on-empty-page."""
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a/ACC1/calls.json",
@@ -3401,7 +3401,7 @@ def test_v105_paginate_garbage_total_pages_falls_back(
 def test_v105_create_tag_rejects_empty_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F12: create_tag was the only write tool with zero input validation —
+    """F12: create_tag was the only write tool with zero input validation;
     empty name/company_id burned an API call before failing server-side."""
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = CallRailClient(max_retries=0)
@@ -3438,7 +3438,7 @@ def test_v105_list_companies_page_param(server_with_mock_client) -> None:
 
 
 # ============================================================
-# v1.1.0 — new tools (leads, SMS threads, server-side stats,
+# v1.1.0: new tools (leads, SMS threads, server-side stats,
 # page views) + enum expansion + transcript-gating hint
 # ============================================================
 
@@ -3644,7 +3644,7 @@ def test_v110_transcript_404_carries_premium_ci_hint(
     server_with_mock_client,
 ) -> None:
     """Since CallRail's 2026-05-21 change, transcript 404s are ambiguous
-    (no transcript vs no Premium CI subscription) — the envelope must
+    (no transcript vs no Premium CI subscription); the envelope must
     say so instead of returning a bare 404."""
     _stub_account()
     responses.add(
@@ -3684,7 +3684,7 @@ def test_v111_paginate_string_items_stops_cleanly(server_with_mock_client) -> No
 def test_v111_resolve_account_id_rejects_dict_accounts(
     server_with_mock_client,
 ) -> None:
-    """accounts as a dict previously raised raw KeyError(0) — must be a
+    """accounts as a dict previously raised raw KeyError(0); must be a
     CallRailError so tool bodies catch it."""
     from callrail_mcp.client import CallRailError
 
@@ -3701,7 +3701,7 @@ def test_v111_resolve_account_id_rejects_dict_accounts(
 
 def test_v111_nan_value_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """NaN/Infinity serialize as invalid JSON tokens (json.dumps
-    allow_nan default) — must be rejected pre-network on all three
+    allow_nan default), so they must be rejected pre-network on all three
     tools with a float `value` param."""
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = CallRailClient(max_retries=0)
@@ -3721,7 +3721,7 @@ def test_v111_nan_value_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 @responses.activate
 def test_v111_tag_id_accepts_numeric_form(server_with_mock_client) -> None:
     """delete_tag's docstring has always promised 'accepts string or
-    numeric forms' — an int tag_id previously crashed with TypeError."""
+    numeric forms', but an int tag_id previously crashed with TypeError."""
     responses.add(
         responses.GET,
         "https://api.callrail.com/v3/a.json",
@@ -3854,7 +3854,7 @@ def test_v112_search_survives_non_string_phone_field(
 
 
 def test_v113_days_cap_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mutation-testing find: the 36500-day cap had no boundary test —
+    """Mutation-testing find: the 36500-day cap had no boundary test;
     a mutant raising the cap 1000x survived (existing test used 10**18,
     which passes any large cap)."""
     from unittest.mock import MagicMock
@@ -3870,7 +3870,7 @@ def test_v113_days_cap_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ============================================================
-# v1.2.0 — CallRail API contract corrections (2026-09 audit)
+# v1.2.0: CallRail API contract corrections (2026-09 audit)
 # ============================================================
 
 
@@ -4048,7 +4048,7 @@ def test_v120_eligibility_still_excludes_bing(server_with_mock_client) -> None:
 
 @responses.activate
 def test_v120_outbound_call_uses_documented_body(server_with_mock_client) -> None:
-    """Pre-fix the body was {"from","to"} — fields CallRail does not accept."""
+    """Pre-fix the body was {"from","to"}, fields CallRail does not accept."""
     responses.add(
         responses.GET, "https://api.callrail.com/v3/a.json",
         json={"accounts": [{"id": "ACC1"}]}, status=200)

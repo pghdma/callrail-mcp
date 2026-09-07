@@ -1,7 +1,7 @@
 """Property-based fuzz tests for tracker tools.
 
 Invariant: tracker tools must NEVER raise an uncaught exception. Whatever
-random garbage we throw at them, they must return parseable JSON — either
+random garbage we throw at them, they must return parseable JSON, either
 a success body or an error envelope (`{"error": True, ...}`).
 
 This guards against:
@@ -89,7 +89,7 @@ def test_create_tracker_never_raises(
     )
     assert _is_envelope(out)
     parsed = json.loads(out)
-    # Validation should reject everything pre-network — we have a fake API key
+    # Validation should reject everything pre-network; we have a fake API key
     # so any actual network call would error out as well, just differently.
     # Either way, the output is parseable JSON.
     assert isinstance(parsed, dict)

@@ -36,7 +36,7 @@ ruff format src tests
 mypy src
 ```
 
-CI runs `ruff check` and `pytest` on every push and PR against Python 3.10, 3.11, 3.12, and 3.13. Mypy is run non-blocking (for now).
+CI runs `ruff check`, `mypy --strict`, `bandit`, and `pytest -W error` on every push and PR against Python 3.10, 3.11, 3.12, 3.13, and 3.14. All of them block: a failure fails the build. Separate jobs verify the package against both supported MCP SDK majors and check the built wheel and sdist.
 
 ## Commit style
 
@@ -71,7 +71,7 @@ python -c "from callrail_mcp.client import CallRailClient; print(CallRailClient(
 
 Maintainers cut releases via GitHub. The flow:
 
-1. Bump the version in `pyproject.toml` and `src/callrail_mcp/__init__.py`.
+1. Bump the version in `pyproject.toml`, `src/callrail_mcp/__init__.py`, the User-Agent string in `src/callrail_mcp/client.py`, and both `version` fields in `server.json`.
 2. Update `CHANGELOG.md`: move items from `## [Unreleased]` under a new `## [x.y.z] - YYYY-MM-DD` heading.
 3. Commit: `chore: release x.y.z`.
 4. Tag: `git tag vX.Y.Z && git push --tags`.

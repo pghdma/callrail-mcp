@@ -6,7 +6,8 @@ Security fixes are applied to the latest minor release. Older releases are not m
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ |
+| 1.2.x | ✅ |
+| < 1.2 | ❌ |
 
 ## Reporting a vulnerability
 
@@ -41,4 +42,4 @@ If your key is ever exposed, **revoke it immediately** at <https://app.callrail.
 
 ## Dependency updates
 
-This project has two runtime dependencies: `mcp` and `requests`. CI covers Python 3.10-3.13 on every push. Dependabot is configured to propose version bumps.
+This project has two runtime dependencies: `mcp` and `requests`. CI covers Python 3.10 through 3.14 on every push, and separately verifies both supported MCP SDK majors. A weekly scheduled run catches breaking dependency releases between commits. Dependabot is configured to propose version bumps.

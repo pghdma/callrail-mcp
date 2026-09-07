@@ -50,7 +50,7 @@ RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
 
 # Originally discovered empirically (10 values); CallRail has since
 # documented the full set of 24 at apidocs.callrail.com (#available-colors).
-# Live-verified 2026-07-03: create_tag(color="cyan1") succeeds — the old
+# Live-verified 2026-07-03: create_tag(color="cyan1") succeeds. The old
 # 10-value tuple was rejecting 14 documented-valid colors. Any value
 # outside this set returns 400 "Color is not included in the list".
 VALID_TAG_COLORS: tuple[str, ...] = (
@@ -124,13 +124,13 @@ def _load_api_key() -> str:
         return key
     raw_path = os.environ.get("CALLRAIL_API_KEY_FILE")
     if raw_path:
-        # Expand both env vars and ~ — without expandvars, paths like
+        # Expand both env vars and ~; without expandvars, paths like
         # "$HOME/keys/file" resolve to the literal string and fail.
         key_path = Path(os.path.expandvars(raw_path)).expanduser()
     else:
         key_path = Path.home() / ".config" / "callrail" / "api-key.txt"
     if key_path.exists():
-        # Warn (don't error) on lax permissions — the API key is a secret
+        # Warn (don't error) on lax permissions: the API key is a secret
         # and credential files should be mode 600 (owner-read-only).
         # Skip on Windows: NTFS doesn't have POSIX mode bits, and
         # `Path.stat().st_mode` returns synthetic values (typically 0o666)
@@ -192,7 +192,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.2.0 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.2.1 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -246,7 +246,7 @@ class CallRailClient:
             return CallRailClient._clamp_delay(default)
 
     # Methods we'll retry on 5xx. POST is excluded because it's not
-    # idempotent — retrying after the server received but failed to
+    # idempotent; retrying after the server received but failed to
     # respond could create duplicate resources (e.g. duplicate trackers
     # at $3/mo each). 429 is still retried for all methods because the
     # server hasn't processed the request yet.
@@ -254,12 +254,12 @@ class CallRailClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Response:
         """Do one HTTP request with retry/backoff on 429, transient network
-        errors, and 5xx (only for idempotent methods — POST is NOT retried
+        errors, and 5xx (only for idempotent methods; POST is NOT retried
         on 5xx to avoid double-writes). Path is URL-encoded segment-by-segment
         to resist path traversal via untrusted IDs."""
         url = urljoin(self.base_url, _safe_path(path))
         kwargs.setdefault("timeout", self.timeout)
-        # Defense in depth — the session already disables redirects.
+        # Defense in depth: the session already disables redirects.
         kwargs.setdefault("allow_redirects", False)
         method_upper = method.upper()
         is_idempotent = method_upper in self._IDEMPOTENT_METHODS
@@ -293,7 +293,7 @@ class CallRailClient:
                 ) from e
 
             # CallRail responds 429 with Retry-After on rate limit (60 req/min/account).
-            # Safe to retry any method — server didn't accept the request.
+            # Safe to retry any method: server didn't accept the request.
             if resp.status_code == 429 and attempt < self.max_retries:
                 delay = self._parse_retry_after(resp.headers.get("Retry-After"), attempt)
                 logger.warning("CallRail 429; sleeping %.1fs (attempt %d)", delay, attempt + 1)
@@ -301,7 +301,7 @@ class CallRailClient:
                 continue
             # 5xx: only retry for idempotent methods. A 502 on POST might
             # mean the server processed the request but the response was
-            # lost — retrying would create a duplicate.
+            # lost; retrying would create a duplicate.
             if 500 <= resp.status_code < 600 and attempt < self.max_retries and is_idempotent:
                 delay = self._clamp_delay(float(2 ** attempt))
                 logger.warning("CallRail %d; retrying in %.1fs (attempt %d)", resp.status_code, delay, attempt + 1)
@@ -461,17 +461,17 @@ class CallRailClient:
             items = data[key]
             # Defensive: a malformed response with a STRING where the
             # items array belongs would make `yield from` emit single
-            # characters — consumers then crash on 'str'.get(). Treat
+            # characters; consumers then crash on 'str'.get(). Treat
             # non-list items as end-of-data with a warning.
             if not isinstance(items, list):
                 logger.warning(
-                    "paginate(%s): expected list under %r, got %s — "
+                    "paginate(%s): expected list under %r, got %s; "
                     "stopping pagination.", path, key, type(items).__name__,
                 )
                 break
             # Yield only dict items. Every CallRail collection contains
             # objects; a non-dict item (malformed/partial response) would
-            # crash consumers on item.get() with a raw AttributeError —
+            # crash consumers on item.get() with a raw AttributeError,
             # uncatchable by tool bodies, which only catch CallRailError.
             skipped = 0
             for item in items:
@@ -487,7 +487,7 @@ class CallRailClient:
                     path, skipped, page,
                 )
             # Use total_pages when present and >0 to detect end-of-results.
-            # Some endpoints omit it or report 0 — in those cases fall back
+            # Some endpoints omit it or report 0; in those cases fall back
             # to "stop on empty page" (handled by the not data.get(key)
             # check at the top of the next iteration). Previously we used
             # `data.get("total_pages", 1)` which silently truncated to
@@ -506,7 +506,7 @@ class CallRailClient:
             # Defensive: don't trust server-reported total_pages above
             # max_pages. A misbehaving / misconfigured server returning
             # `total_pages: 999999` shouldn't pin the iterator against the
-            # caller's intended cap — just stop at max_pages.
+            # caller's intended cap. Just stop at max_pages.
             if total_pages and page >= min(total_pages, max_pages):
                 if stats is not None and total_pages > max_pages:
                     # Exiting via break, so the while/else clause below never

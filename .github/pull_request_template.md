@@ -2,7 +2,7 @@
 
 ## Summary
 
-What does this PR change? Keep it tight — one-liner is best.
+What does this PR change? Keep it tight; one-liner is best.
 
 ## Related issue(s)
 

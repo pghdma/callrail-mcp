@@ -1,5 +1,5 @@
-"""CallRail MCP — Model Context Protocol server for CallRail."""
+"""CallRail MCP: Model Context Protocol server for CallRail."""
 
 from __future__ import annotations
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
