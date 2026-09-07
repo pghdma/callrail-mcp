@@ -2580,8 +2580,8 @@ def test_v060_create_company_happy(server_with_mock_client) -> None:
     assert body["name"] == "Acme"
     assert body["time_zone"] == "America/New_York"
     # v0.6.1 audit fix: optional bools are no longer sent unless caller
-    # explicitly specified. They would otherwise disable paid features that
-    # are enabled at the account level.
+    # explicitly specified: sending them would otherwise disable paid
+    # features that are enabled at the account level.
     assert "callscore_enabled" not in body
     assert "lead_scoring_enabled" not in body
     assert "callscribe_enabled" not in body
@@ -3684,7 +3684,7 @@ def test_v111_paginate_string_items_stops_cleanly(server_with_mock_client) -> No
 def test_v111_resolve_account_id_rejects_dict_accounts(
     server_with_mock_client,
 ) -> None:
-    """accounts as a dict previously raised raw KeyError(0); must be a
+    """accounts as a dict previously raised raw KeyError(0). It must be a
     CallRailError so tool bodies catch it."""
     from callrail_mcp.client import CallRailError
 

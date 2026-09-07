@@ -224,8 +224,8 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
         if signature not in _warned_multi_tz_signature:
             _warned_multi_tz_signature.add(signature)
             logger.warning(
-                "Multiple time zones across active companies %s, using first; "
-                "consider passing tz explicitly to aggregation tools.",
+                "Multiple time zones across active companies %s. Using the "
+                "first; consider passing tz explicitly to aggregation tools.",
                 sorted(signature),
             )
     for c in active_companies:
@@ -1349,8 +1349,8 @@ def list_text_messages(
 @mcp.tool()
 def list_users(account_id: str | None = None) -> str:
     """List all users on the account. Returns a single page of up to
-    `MAX_PER_PAGE` users (no pagination support, which fits small/medium
-    agency accounts).
+    `MAX_PER_PAGE` users (no pagination support; adequate for small and
+    medium agency accounts).
 
     Args:
         account_id: CallRail account ID. Auto-resolves if omitted.
@@ -1577,7 +1577,7 @@ def update_call(
     submissions. See `update_form_submission`.
 
     Empty-string fields (e.g. `note=""`) are rejected because CallRail
-    interprets them as "clear this field", almost always a mistake.
+    interprets them as "clear this field", which is almost always a mistake.
     To intentionally clear a field, set it to None and use a separate UI
     operation, or contact CallRail support.
 
@@ -2733,8 +2733,8 @@ def bulk_update_calls(
     "add a note to every call from a specific landing page". Replaces
     dozens of sequential `update_call` invocations with one tool call.
 
-    **Safety:** `dry_run=True` by default. It returns a preview of which
-    calls WOULD be updated without actually writing. Pass `dry_run=False`
+    **Safety:** `dry_run=True` by default, so this tool returns a preview
+    of which calls WOULD be updated without actually writing. Pass `dry_run=False`
     to commit. Hard cap of 500 calls per invocation to prevent runaway
     bulk operations.
 
@@ -4315,7 +4315,7 @@ def list_sms_threads(
 ) -> str:
     """List SMS threads. Unlike `list_text_messages` (conversation
     transcripts), threads carry the lead-management surface: `notes`,
-    `value`, `tags`, `lead_qualification`, `state`. They are also UPDATABLE
+    `value`, `tags`, `lead_qualification`, `state`. Threads are UPDATABLE
     via `update_sms_thread`.
 
     Args:
@@ -4376,7 +4376,7 @@ def update_sms_thread(
     lead_qualification: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Update an SMS thread's lead-management fields, the texting
+    """Update an SMS thread's lead-management fields. This is the texting
     equivalent of `update_call`. Closes the gap where texting leads
     couldn't be tagged / noted / qualified via API.
 

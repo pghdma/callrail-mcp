@@ -124,7 +124,7 @@ def _load_api_key() -> str:
         return key
     raw_path = os.environ.get("CALLRAIL_API_KEY_FILE")
     if raw_path:
-        # Expand both env vars and ~; without expandvars, paths like
+        # Expand both env vars and ~. Without expandvars, paths like
         # "$HOME/keys/file" resolve to the literal string and fail.
         key_path = Path(os.path.expandvars(raw_path)).expanduser()
     else:
@@ -254,7 +254,7 @@ class CallRailClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Response:
         """Do one HTTP request with retry/backoff on 429, transient network
-        errors, and 5xx (only for idempotent methods; POST is NOT retried
+        errors, and 5xx (only for idempotent methods: POST is NOT retried
         on 5xx to avoid double-writes). Path is URL-encoded segment-by-segment
         to resist path traversal via untrusted IDs."""
         url = urljoin(self.base_url, _safe_path(path))
