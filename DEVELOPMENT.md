@@ -24,8 +24,11 @@ sed -i '' 's/0.X.Y/0.X.Z/g' src/callrail_mcp/__init__.py pyproject.toml src/call
 git add -A && git commit -m "..." && git push
 # 5. reinstall locally so new tools are picked up on next MCP client restart
 pipx install . --force
-# 6. (optional) publish to PyPI: git tag v0.X.Z && git push --tags && create GitHub Release
-#    publish.yml handles the build+upload via trusted publishing (one-time setup at pypi.org)
+# 6. publish: git tag vX.Y.Z && git push origin vX.Y.Z && gh release create vX.Y.Z --notes-file <notes.md>
+#    publish.yml then does the rest with no manual steps: verifies every version field matches
+#    the tag, uploads to PyPI (trusted publishing), waits for PyPI to serve it, and publishes
+#    server.json to the MCP registry via GitHub OIDC. No device codes, no local mcp-publisher.
+#    To prove the registry path without a release: Actions > Publish > Run workflow > staging.
 ```
 
 Restart your MCP client after `pipx install --force` for new tools to appear in the session.

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed: CI
+
+- **Registry publishing is now part of the release workflow.** After the
+  PyPI upload, `publish.yml` waits for PyPI to serve the new version, then
+  publishes `server.json` to the MCP registry using GitHub OIDC
+  (`mcp-publisher login github-oidc`). No interactive device code and no
+  locally installed publisher are involved any more.
+- **A version guard runs before anything is uploaded.** The workflow
+  asserts that `pyproject.toml`, `__init__.py`, the User-Agent string, and
+  both `version` fields in `server.json` all match the release tag, so a
+  missed bump fails fast instead of leaving PyPI and the registry out of
+  step.
+- `mcp-publisher` is pinned to 1.8.1 and verified against the published
+  sha256 before it runs. A manual run of the workflow can target the
+  staging registry to prove the path without cutting a release.
+
 ## [1.2.1] - 2026-09-07
 
 Presentation and maintenance release. No behavior changes: all 408 tests,

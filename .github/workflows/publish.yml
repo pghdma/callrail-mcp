@@ -1,12 +1,68 @@
-name: Publish to PyPI
+name: Publish
+
+# One release, zero manual steps:
+#   1. verify-version    every version field must match the tag, or nothing publishes
+#   2. build-and-publish PyPI upload via trusted publishing (unchanged)
+#   3. publish-registry  MCP registry entry via GitHub OIDC, no device code, no local tool
+#
+# A manual run ("Run workflow") never touches PyPI. It publishes server.json to the
+# registry you pick; choose "staging" to prove the OIDC path without cutting a release.
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      registry:
+        description: "Registry to publish server.json to (manual runs skip PyPI)"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+env:
+  MCP_PUBLISHER_VERSION: "1.8.1"
+  # sha256 of mcp-publisher_linux_amd64.tar.gz for that version, taken from
+  # registry_<version>_checksums.txt on the GitHub release. Bump both together.
+  MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
 
 jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Every version field must agree (and match the tag on a release)
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, pathlib
+
+          def grab(path, pattern):
+              m = re.search(pattern, pathlib.Path(path).read_text(encoding="utf-8"), re.M)
+              if not m:
+                  sys.exit(f"could not find a version in {path}")
+              return m.group(1)
+
+          seen = {
+              "pyproject.toml": grab("pyproject.toml", r'^version = "([^"]+)"'),
+              "src/callrail_mcp/__init__.py": grab("src/callrail_mcp/__init__.py", r'^__version__ = "([^"]+)"'),
+              "client.py User-Agent": grab("src/callrail_mcp/client.py", r'callrail-mcp/(\d+\.\d+\.\d+)'),
+          }
+          sj = json.loads(pathlib.Path("server.json").read_text(encoding="utf-8"))
+          seen["server.json version"] = sj["version"]
+          seen["server.json packages[0].version"] = sj["packages"][0]["version"]
+          if os.environ.get("GITHUB_EVENT_NAME") == "release":
+              seen["release tag"] = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+
+          for k, v in seen.items():
+              print(f"  {k:36s} {v}")
+          if len(set(seen.values())) != 1:
+              sys.exit("VERSION MISMATCH: every field above must be identical. Nothing was published.")
+          print("all version fields agree")
+          PY
+
   build-and-publish:
+    needs: verify-version
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -30,3 +86,86 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-registry:
+    needs: [verify-version, build-and-publish]
+    # always() so a skipped PyPI job (manual runs) does not skip this one; the
+    # conditions below re-impose the real requirements per trigger.
+    if: >-
+      always()
+      && needs.verify-version.result == 'success'
+      && (
+        (github.event_name == 'release' && needs.build-and-publish.result == 'success')
+        || github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # GitHub mints an OIDC token; the registry swaps it for a publish token. No secrets.
+      contents: read
+    env:
+      REGISTRY_URL: ${{ (github.event_name == 'release' || inputs.registry == 'production') && 'https://registry.modelcontextprotocol.io' || 'https://staging.registry.modelcontextprotocol.io' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mcp-publisher (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o mcp-publisher.tgz
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tgz" | sha256sum --check
+          tar xzf mcp-publisher.tgz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Wait until PyPI serves the new version
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS "https://pypi.org/pypi/callrail-mcp/${version}/json" -o /dev/null; then
+              echo "PyPI serves callrail-mcp ${version}"
+              exit 0
+            fi
+            echo "attempt ${attempt}/20: not visible yet, sleeping 15s"
+            sleep 15
+          done
+          echo "PyPI never served ${version}; the registry would reject the entry, so stopping here."
+          exit 1
+
+      - name: Log in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc --registry "$REGISTRY_URL"
+
+      - name: Publish server.json
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')"
+          echo "publishing io.github.pghdma/callrail-mcp ${version} to ${REGISTRY_URL}"
+          if ./mcp-publisher publish; then
+            exit 0
+          fi
+          # A re-run after a lost response must not fail on "version already exists".
+          echo "publish returned non-zero; checking whether ${version} is already live"
+          curl -fsS "${REGISTRY_URL}/v0/servers?search=callrail" | python3 -c '
+          import json, sys
+          want = sys.argv[1]
+          live = [e.get("server", e) for e in json.load(sys.stdin).get("servers", [])]
+          ok = any(s.get("name") == "io.github.pghdma/callrail-mcp" and s.get("version") == want for s in live)
+          print("already live" if ok else "not live")
+          sys.exit(0 if ok else 1)
+          ' "$version"
+
+      - name: Confirm the registry lists the new version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')"
+          curl -fsS "${REGISTRY_URL}/v0/servers?search=callrail" | python3 -c '
+          import json, sys
+          want = sys.argv[1]
+          for e in json.load(sys.stdin).get("servers", []):
+              s = e.get("server", e)
+              if s.get("name") == "io.github.pghdma/callrail-mcp" and s.get("version") == want:
+                  latest = e.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {}).get("isLatest")
+                  print(f"registry has {want}, isLatest={latest}")
+                  sys.exit(0)
+          sys.exit(f"registry does not list {want}")
+          ' "$version"
