@@ -8,7 +8,7 @@ assignees: ''
 
 ## Use case
 
-What are you trying to do with your MCP client (Claude, Cursor, etc.)? Describe the real workflow — e.g. *"I want to ask Claude to list all missed calls from Google Ads that lasted under 10 seconds so we can flag ad-copy misfires."*
+What are you trying to do with your MCP client (Claude, Cursor, etc.)? Describe the real workflow, e.g. *"I want to ask Claude to list all missed calls from Google Ads that lasted under 10 seconds so we can flag ad-copy misfires."*
 
 ## Proposed tool / API surface
 

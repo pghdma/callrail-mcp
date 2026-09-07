@@ -24,7 +24,19 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as _MCPServer
+except ModuleNotFoundError:  # pragma: no cover - exercised by the mcp2 CI job
+    # mcp 2.0 (released 2026-07-28) renamed FastMCP to MCPServer and removed
+    # the old module entirely. The surface we rely on (.tool() decorator,
+    # .run(), ._tool_manager) is unchanged, so a rebind is sufficient.
+    # Without this, `pip install callrail-mcp` resolves mcp 2.x and the
+    # package fails to import at all.
+    # Only one of the two module paths exists in any given install, so
+    # whichever major mypy resolves against, the other is unresolvable.
+    from mcp.server.mcpserver import (  # type: ignore[no-redef,import-not-found]
+        MCPServer as _MCPServer,
+    )
 
 from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
 
@@ -59,7 +71,7 @@ class _ClientProxy:
 
 
 client = _ClientProxy()
-mcp = FastMCP("callrail-mcp")
+mcp = _MCPServer("callrail-mcp")
 
 
 # ---- Shared helpers ----
@@ -340,6 +352,46 @@ def _validate_window(
     return True, ""
 
 
+# CallRail's real answer-status filter on GET /calls.json. Verified live
+# 2026-09-07: `answer_status=answered` + `answer_status=missed` partition the
+# window exactly (885 + 220 = 1105 total). There is NO `answered` param —
+# passing one is silently ignored and returns every call.
+VALID_ANSWER_STATUS: tuple[str, ...] = ("answered", "missed", "voicemail")
+
+
+def _resolve_answer_status(
+    answered: str | None, answer_status: str | None,
+) -> tuple[str | None, str]:
+    """Resolve the deprecated `answered` alias and `answer_status` into one
+    server-side filter value. Returns (value_or_None, error_message).
+
+    `answered='true'/'false'` used to be forwarded verbatim as an `answered`
+    query param, which CallRail does not implement: the filter was silently
+    dropped and callers received (or, in bulk_update_calls, WROTE TO) every
+    call in the window. We now translate it to the real parameter.
+    """
+    if answer_status is not None:
+        if not isinstance(answer_status, str) or answer_status not in VALID_ANSWER_STATUS:
+            return None, (
+                f"answer_status={answer_status!r} must be one of "
+                f"{VALID_ANSWER_STATUS}."
+            )
+        if answered is not None:
+            return None, (
+                "Pass either answer_status or the deprecated `answered` "
+                "alias, not both."
+            )
+        return answer_status, ""
+    if answered is None:
+        return None, ""
+    if not isinstance(answered, str) or answered.strip().lower() not in ("true", "false"):
+        return None, (
+            f"answered={answered!r} must be 'true' or 'false' (string) or None. "
+            f"Prefer answer_status={VALID_ANSWER_STATUS}."
+        )
+    return ("answered" if answered.strip().lower() == "true" else "missed"), ""
+
+
 def _clamp_per_page(per_page: int) -> int:
     """Clamp per_page to [1, MAX_PER_PAGE]. Silently corrects nonsense input
     (including non-int types — "" / "250" / None previously raised raw
@@ -511,13 +563,10 @@ def _validate_pool_size(value: int) -> tuple[bool, str]:
     to prevent accidental 5-figure provisioning bills."""
     if isinstance(value, bool) or not isinstance(value, int):
         return False, f"pool_size must be an integer (got {type(value).__name__})."
-    if value < 1:
-        return False, f"pool_size={value} must be >= 1."
+    if value < 4:
+        return False, f"pool_size={value} must be >= 4 (CallRail's session-pool minimum)."
     if value > 50:
-        return False, (
-            f"pool_size={value} exceeds safety cap of 50. "
-            f"If you really need this many, edit the cap in server.py."
-        )
+        return False, f"pool_size={value} exceeds CallRail's session-pool maximum of 50."
     return True, ""
 
 
@@ -719,16 +768,19 @@ def create_tracker(
             cost. Returns an error envelope if False (default).
         type: 'source' (single number tied to one traffic source) or 'session'
             (DNI pool that swaps numbers per visitor). Default 'source'.
-        source_type: For type='source', which traffic source. Must be one of:
-            'all', 'direct', 'offline', 'google_my_business',
-            'google_ad_extension' (this is what Google Ads call-extension uses).
-            Ignored for type='session' (use 'all').
+        source_type: For type='source', which traffic source. One of
+            VALID_SOURCE_TYPES: 'all', 'landing_url', 'landing_params',
+            'offline', 'web_referrer', 'direct', 'search',
+            'google_ad_extension' (what Google Ads call extensions use),
+            'mobile_ad_extension', 'google_my_business', plus the
+            production-observed 'facebook_all' and 'bing_all'.
+            Ignored for type='session'.
         area_code: 3-digit area code to provision the local number from
             (e.g. '412'). Ignored if `toll_free=True`.
         toll_free: If True, provision an 8XX toll-free number instead.
-        pool_size: For type='session' only — how many numbers in the DNI pool
-            (CallRail's "pool_size" required field). Typical 4-10. Each pool
-            number is billed separately.
+        pool_size: For type='session' only. How many numbers in the DNI
+            pool. CallRail requires 4-50; each pool number is billed
+            separately, so this multiplies your monthly cost.
         whisper_message: Spoken to the agent answering the call so they know
             which marketing source it came from.
         recording_enabled: Record the call audio. Default True.
@@ -812,14 +864,29 @@ def create_tracker(
         body["call_flow"]["greeting_text"] = greeting_text
     if type == "source":
         body["source"] = {"type": source_type}
-    tn: dict[str, Any] = {}
-    if toll_free:
-        tn["toll_free"] = True
-    elif area_code:
-        tn["area_code"] = area_code
-    if type == "session" and pool_size is not None:
-        tn["pool_size"] = pool_size
-    body["tracking_number"] = tn
+        tn: dict[str, Any] = {}
+        if toll_free:
+            tn["toll_free"] = True
+        elif area_code:
+            tn["area_code"] = area_code
+        body["tracking_number"] = tn
+    else:
+        # Session pools use a DIFFERENT request schema than source trackers
+        # (CallRail "Creating a Session Tracker"): `pool_size` sits at the
+        # TOP level, provisioning constraints go under `pool_numbers` (not
+        # `tracking_number`), and `source` is required. Nesting pool_size
+        # inside tracking_number returns 400 "missing required parameter
+        # 'pool_size'", so session-pool creation never worked before v1.2.0.
+        body["pool_size"] = pool_size
+        pn: dict[str, Any] = {}
+        if toll_free:
+            pn["toll_free"] = True
+        else:
+            if area_code:
+                pn["area_code"] = area_code
+            pn["local"] = destination_number
+        body["pool_numbers"] = pn
+        body["source"] = "all"
     if whisper_message is not None:
         body["whisper_message"] = whisper_message
     body["sms_enabled"] = sms_enabled
@@ -973,12 +1040,13 @@ def list_calls(
     end_date: str | None = None,
     source: str | None = None,
     answered: str | None = None,
+    answer_status: str | None = None,
     per_page: int = 100,
     page: int = 1,
     fields: str | None = None,
 ) -> str:
-    """List calls. Paginated. Filterable by company, date window, source,
-    answered status.
+    """List calls. Paginated. Filterable by company, date window, and
+    answer status.
 
     Args:
         account_id: Auto-resolves if omitted.
@@ -986,17 +1054,31 @@ def list_calls(
         days: Lookback in days (default 7). Ignored if `start_date` provided.
         start_date: 'YYYY-MM-DD'.
         end_date: 'YYYY-MM-DD' (defaults to today).
-        source: Filter (e.g. 'google_paid', 'google_organic', 'direct', 'bing_paid').
-        answered: 'true' or 'false'.
+        answer_status: Server-side filter. One of 'answered', 'missed',
+            'voicemail'. This is CallRail's real filter parameter.
+        answered: DEPRECATED alias kept for backwards compatibility.
+            'true' maps to answer_status='answered', 'false' to 'missed'.
+            (CallRail has no `answered` query param; passing it used to be
+            silently ignored, so results were unfiltered.)
+        source: CallRail has NO server-side source filter, so this is applied
+            CLIENT-SIDE to the current page only: the `calls` array is
+            filtered by exact, case-insensitive match on each call's `source`
+            field. `total_records`/`total_pages` in the response still
+            describe the UNFILTERED query — see `source_filter` in the
+            response for what was actually applied. For source breakdowns
+            prefer `call_stats(group_by='source')`.
         per_page: Max 250.
         page: 1-indexed.
         fields: Comma-separated additional fields to include, e.g.
-            'company_name,source_name,keywords,landing_page_url,device,
+            'company_name,source_name,keywords,landing_page_url,device_type,
             first_call,value,tags,note,gclid,fbclid,utm_source,utm_medium,
             utm_campaign,utm_content,utm_term,referrer_domain'.
     """
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
+        return _err_msg(msg)
+    status, msg = _resolve_answer_status(answered, answer_status)
+    if msg:
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
@@ -1004,13 +1086,36 @@ def list_calls(
         params.update(_date_window(days, start_date, end_date))
         if company_id:
             params["company_id"] = company_id
-        if source:
-            params["source"] = source
-        if answered is not None:
-            params["answered"] = answered
+        if status:
+            params["answer_status"] = status
         if fields:
             params["fields"] = fields
-        return _ok(client.get(f"a/{aid}/calls.json", params))
+        data = client.get(f"a/{aid}/calls.json", params)
+        if source:
+            # No server-side equivalent exists; filter the page we fetched
+            # and say so explicitly rather than returning unfiltered data
+            # that merely looks filtered.
+            calls = data.get("calls")
+            if isinstance(calls, list):
+                before = len(calls)
+                data["calls"] = [
+                    c for c in calls
+                    if isinstance(c, dict)
+                    and isinstance(c.get("source"), str)
+                    and c["source"].strip().lower() == source.strip().lower()
+                ]
+                data["source_filter"] = {
+                    "requested": source,
+                    "applied": "client_side_current_page",
+                    "matched_on_page": len(data["calls"]),
+                    "page_size_before_filter": before,
+                    "note": (
+                        "CallRail has no server-side source filter; "
+                        "total_records/total_pages above describe the "
+                        "unfiltered query."
+                    ),
+                }
+        return _ok(data)
     except CallRailError as e:
         return _err(e)
 
@@ -1075,7 +1180,10 @@ def call_summary(
         by_source: dict[str, int] = {}
         by_source_name: dict[str, int] = {}
 
-        for c in client.paginate(f"a/{aid}/calls.json", params, items_key="calls", max_pages=50):
+        scan: dict[str, Any] = {}
+        for c in client.paginate(
+            f"a/{aid}/calls.json", params, items_key="calls", max_pages=50, stats=scan,
+        ):
             total += 1
             if c.get("answered"):
                 answered += 1
@@ -1112,6 +1220,14 @@ def call_summary(
                 "total_duration_seconds": duration_total,
                 "by_source": dict(sorted(by_source.items(), key=lambda x: -x[1])),
                 "by_source_name": dict(sorted(by_source_name.items(), key=lambda x: -x[1])[:25]),
+                "scan_truncated": bool(scan.get("truncated")),
+                "scan_note": (
+                    f"Only the first {scan.get('items_yielded')} calls were "
+                    f"scanned (pagination cap of {scan.get('max_pages')} pages); "
+                    f"CallRail reports {scan.get('total_records')} total. "
+                    f"Counts below UNDERSTATE the window — narrow the date "
+                    f"range or filter by company_id."
+                ) if scan.get("truncated") else None,
             }
         )
     except CallRailError as e:
@@ -1380,7 +1496,10 @@ def search_calls_by_number(
         SEARCH_MATCH_CAP = 500
         matches: list[dict[str, Any]] = []
         truncated = False
-        for c in client.paginate(f"a/{aid}/calls.json", params, items_key="calls", max_pages=50):
+        scan: dict[str, Any] = {}
+        for c in client.paginate(
+            f"a/{aid}/calls.json", params, items_key="calls", max_pages=50, stats=scan,
+        ):
             raw_num = c.get("customer_phone_number")
             num = _digits_only(raw_num) if isinstance(raw_num, str) else ""
             if num.endswith(digits):
@@ -1393,6 +1512,16 @@ def search_calls_by_number(
             "match_count": len(matches),
             "truncated": truncated,
             "match_cap": SEARCH_MATCH_CAP if truncated else None,
+            # Distinct from `truncated` (too many MATCHES): this means the
+            # underlying scan itself was cut short, so matches beyond it were
+            # never examined and match_count may understate reality.
+            "scan_truncated": bool(scan.get("truncated")),
+            "scan_note": (
+                f"Only the first {scan.get('items_yielded')} calls in the "
+                f"window were scanned (pagination cap); CallRail reports "
+                f"{scan.get('total_records')} total. Matches outside that "
+                f"slice were not seen. Narrow `days` or pass company_id."
+            ) if scan.get("truncated") else None,
             "calls": matches,
         })
     except CallRailError as e:
@@ -1941,6 +2070,7 @@ def usage_summary(
         date_params = _date_window(days, start_date, end_date, tz=account_tz)
         per_company: list[dict[str, Any]] = []
         partial_failures: list[dict[str, Any]] = []
+        truncated_companies: list[str] = []
 
         for c in active_companies:
             cid = c.get("id")
@@ -1973,8 +2103,9 @@ def usage_summary(
                 # Calls + minutes in window (paginated). Critical: without
                 # this, big clients silently truncate at 250 calls.
                 call_params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
+                scan: dict[str, Any] = {}
                 for call in client.paginate(
-                    f"a/{aid}/calls.json", call_params, items_key="calls"
+                    f"a/{aid}/calls.json", call_params, items_key="calls", stats=scan,
                 ):
                     call_count += 1
                     # Robust int coercion — CallRail returns int but defend
@@ -1990,7 +2121,7 @@ def usage_summary(
                             "duration=%r in company %s", raw_duration, cid,
                         )
                 minutes = round(total_seconds / 60.0, 1)
-                per_company.append({
+                row: dict[str, Any] = {
                     "company_id": cid,
                     "name": c.get("name", "(unnamed)"),
                     "active_local_numbers": local_numbers,
@@ -1998,7 +2129,15 @@ def usage_summary(
                     "active_total_numbers": local_numbers + toll_free_numbers,
                     "minutes_in_window": minutes,
                     "calls_in_window": call_count,
-                })
+                }
+                if scan.get("truncated"):
+                    # The scan hit the pagination cap, so minutes/calls for
+                    # this company are a floor, not a total. Say so per-row
+                    # rather than letting the cost model imply completeness.
+                    row["scan_truncated"] = True
+                    row["scan_total_records"] = scan.get("total_records")
+                    truncated_companies.append(c.get("name", cid))
+                per_company.append(row)
             except CallRailError as e:
                 # Per-company partial-success: don't let one company's
                 # transient failure poison the whole agency report. Surface
@@ -2127,10 +2266,13 @@ def usage_summary(
                 per_company[0]["name"] if per_company else None
             ),
             "partial_failures": partial_failures,
+            "scan_truncated_companies": truncated_companies,
             "notes": [
                 "Number counts are CURRENT active counts (snapshot), not historical.",
                 "Minutes are aggregated over the requested window via paginated "
-                "calls (no truncation).",
+                "calls. Pagination is capped at 50 pages x 250 calls = 12,500 "
+                "calls per company; any company that hit the cap is listed in "
+                "`scan_truncated_companies` and its minutes are a FLOOR.",
                 "Per-company attribution splits the bill proportionally to "
                 "(numbers + minutes) contribution; a perfectly fair model would "
                 "credit larger users for absorbing more of the bundle.",
@@ -2257,14 +2399,17 @@ def call_eligibility_check(
         # generic (e.g. "Website Pool" for a DNI session that happens
         # to have served a Google Ads visitor).
         #
-        # We deliberately use `source` (CallRail's internal slug) NOT
-        # `source_name` (user-editable display string) — a tracker named
-        # "Bing Ads (Google legacy import)" would false-positive on
-        # source_name substring match but is clearly Bing.
+        # `source` is a human-readable DISPLAY name, not a slug. Live values
+        # on a production account (2026-09-07) are e.g. "Google Ads",
+        # "Google Organic", "Google My Business", "Bing Organic", "Direct".
+        # The old slug tests (`== "google"` / `startswith("google_")`) never
+        # matched anything, so every Google Ads call WITHOUT a gclid was
+        # reported as not-Google — in the one tool built to debug Google Ads.
+        # Match the display form instead, while still excluding Bing/other.
+        _src = source_slug or source_name
         is_google = (
             utm_source == "google"
-            or source_slug == "google"
-            or source_slug.startswith("google_")
+            or _src.startswith("google")
             or bool(gclid)
         )
 
@@ -2459,6 +2604,12 @@ def compare_periods(
                         "partial_calls_before_failure": call_count,
                         "partial_minutes_before_failure": round(total_seconds / 60.0, 1),
                     })
+                    # Do NOT fall through: a company whose pagination failed
+                    # mid-window has partial data, and silently folding it
+                    # into totals/biggest_mover made deltas look like real
+                    # traffic changes. usage_summary already excludes failed
+                    # companies; match that so the two tools agree.
+                    continue
                 agg_by_company[cid] = {
                     "name": c.get("name", "(unnamed)"),
                     "minutes": round(total_seconds / 60.0, 1),
@@ -2550,6 +2701,7 @@ def bulk_update_calls(
     days: int = 7,
     source: str | None = None,
     answered: str | None = None,
+    answer_status: str | None = None,
     set_tags_add: list[str] | None = None,
     set_note: str | None = None,
     set_lead_status: str | None = None,
@@ -2570,20 +2722,31 @@ def bulk_update_calls(
     bulk operations.
 
     Args:
-        company_id, days, source, answered: filter — same semantics as
-            `list_calls`. At least one must be provided to avoid
-            "update everything ever".
+        company_id, days: filter — same semantics as `list_calls`. At least
+            one filter must be provided to avoid "update everything ever".
+        answer_status: server-side filter — 'answered', 'missed', or
+            'voicemail'.
+        answered: DEPRECATED alias ('true' -> answered, 'false' -> missed).
+            Before v1.2.0 this was forwarded as an `answered` query param
+            that CallRail does not implement: the filter was silently
+            dropped, so a commit run updated EVERY call in the window.
+        source: applied CLIENT-SIDE (exact, case-insensitive match on each
+            call's `source` field) because CallRail has no server-side
+            source filter. Matching happens before the 500-cap is applied.
         set_tags_add: tag names to ADD to each matched call (preserves
             existing tags). Mutually compatible with other set_* fields.
         set_note: note text to set on each matched call (replaces existing).
         set_lead_status: e.g. 'good_lead', 'not_a_lead'.
-        set_spam: True to mark spam, False to unmark.
+        set_spam: True to mark spam. NOTE: CallRail does not support
+            un-marking spam via the API, so set_spam=False is rejected.
         dry_run: If True (default), return preview only. False = commit.
         account_id: Auto-resolves if omitted.
 
     Returns:
-        - If dry_run: `{"matched": N, "would_update": [...]}`
-        - Else: `{"matched": N, "updated": M, "failed": [...]}` per call
+        - If dry_run: `{"dry_run": true, "matched": N,
+          "would_update_calls": [...], "set_fields": {...}}`
+        - Else: `{"dry_run": false, "matched": N, "updated": M,
+          "failed_count": K, "failures": [...]}`
 
     Performance note: when `set_tags_add` is used, the commit phase
     issues 1 extra GET per call to fetch fresh tags before merging
@@ -2598,18 +2761,23 @@ def bulk_update_calls(
     # (str < int), crashing the tool reply. Same bug class as the
     # v0.4.7 _date_window and v0.5.3 spam_detector cap fixes.
     days_int = _coerce_days_int(days)
-    if not company_id and not source and not answered and (days_int is None or days_int < 1):
+    if (not company_id and not source and not answered and answer_status is None
+            and (days_int is None or days_int < 1)):
         return _err_msg(
             "bulk_update_calls requires at least one filter "
-            "(company_id, source, answered, or days>=1) to avoid "
+            "(company_id, source, answer_status, or days>=1) to avoid "
             "accidentally targeting every call in the account."
         )
-    # Validate `answered` — CallRail accepts only "true"/"false" strings.
-    # A bad value (e.g. answered="no") would be silently ignored by CallRail,
-    # returning ALL calls, which then get bulk-updated — wrong.
-    if answered is not None and answered not in ("true", "false"):
+    status, msg = _resolve_answer_status(answered, answer_status)
+    if msg:
+        return _err_msg(msg)
+    if set_spam is False:
+        # CallRail's "Updating a Call" spec: spam status cannot be removed
+        # via the API. Silently PUTting spam=false looked like it worked.
         return _err_msg(
-            f"answered={answered!r} must be 'true' or 'false' (string) or None."
+            "set_spam=False is not supported: CallRail does not allow "
+            "un-marking spam via the API. Remove the spam flag in the "
+            "CallRail UI instead."
         )
     # Require at least one update field.
     update_fields = [
@@ -2653,16 +2821,23 @@ def bulk_update_calls(
         params: dict[str, Any] = {"per_page": 250, **_date_window(days, None, None)}
         if company_id:
             params["company_id"] = company_id
-        if source:
-            params["source"] = source
-        if answered is not None:
-            params["answered"] = answered
+        if status:
+            params["answer_status"] = status
         params["fields"] = "tags,source,duration,answered,customer_name,first_call"
         matched: list[dict[str, Any]] = []
         # Track whether we broke out due to cap so we can surface
         # "there are more" to the caller (silent truncation risk).
         truncated_at_cap = False
+        want_source = source.strip().lower() if source else None
         for call in client.paginate(f"a/{aid}/calls.json", params, items_key="calls"):
+            if want_source is not None:
+                # CallRail has no server-side source filter. Before v1.2.0
+                # `source` was forwarded as a query param and ignored, so a
+                # commit run wrote to every call in the window regardless of
+                # source. Filter client-side instead, BEFORE the cap.
+                got = call.get("source") if isinstance(call, dict) else None
+                if not isinstance(got, str) or got.strip().lower() != want_source:
+                    continue
             if len(matched) >= _BULK_UPDATE_CAP:
                 truncated_at_cap = True
                 break
@@ -3116,9 +3291,12 @@ def update_company(
         swap_exclude_jquery: Skip jQuery initialization in DNI script.
         callscribe_enabled: Conversation Intelligence (transcripts +
             keyword spotting). PAID feature.
-        keyword_spotting_enabled: Flag calls containing watch-list
-            keywords.
+        keyword_spotting_enabled: DEPRECATED by CallRail. Accepted for
+            compatibility but has no effect.
+        swap_exclude_jquery: DEPRECATED by CallRail (the DNI script no
+            longer needs jQuery). Accepted but has no effect.
         form_capture: Enable CallRail Form Tracking on this company.
+            Sent as CallRail's `external_form_capture` PUT field.
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
@@ -3150,7 +3328,9 @@ def update_company(
         ("swap_exclude_jquery", swap_exclude_jquery),
         ("callscribe_enabled", callscribe_enabled),
         ("keyword_spotting_enabled", keyword_spotting_enabled),
-        ("form_capture", form_capture),
+        # The PUT field is `external_form_capture`; `form_capture` appears
+        # only in RESPONSE bodies, so sending it was a silent no-op.
+        ("external_form_capture", form_capture),
     ):
         if val is not None:
             body[key] = val
@@ -3283,7 +3463,11 @@ def create_user(
         "role": role,
     }
     if company_ids:
-        body["company_ids"] = company_ids
+        # CallRail's documented field is `companies` (an array of company
+        # ids), NOT `company_ids`. Sending the wrong key meant the access
+        # list was dropped, and it is REQUIRED for the manager/reporting
+        # roles (reporting is this tool's default).
+        body["companies"] = company_ids
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.post(f"a/{aid}/users.json", body))
@@ -3362,7 +3546,8 @@ def update_user(
         ("first_name", first_name),
         ("last_name", last_name),
         ("role", role),
-        ("company_ids", company_ids),
+        # Documented field name is `companies` (see create_user).
+        ("companies", company_ids),
     ):
         if val is not None:
             body[key] = val
@@ -3456,55 +3641,12 @@ def get_text_message(conversation_id: str, account_id: str | None = None) -> str
         return _err(e)
 
 
-@mcp.tool()
-def list_webhooks(
-    company_id: str | None = None,
-    per_page: int = 250,
-    page: int = 1,
-    account_id: str | None = None,
-) -> str:
-    """List webhook subscriptions on the account or one company.
-
-    Args:
-        company_id: Filter to webhooks attached to one company.
-        per_page: Page size (max 250).
-        page: 1-indexed.
-        account_id: Auto-resolves if omitted.
-    """
-    try:
-        aid = client.resolve_account_id(account_id)
-        params: dict[str, Any] = {
-            "per_page": _clamp_per_page(per_page),
-            "page": _clamp_page(page),
-        }
-        if company_id:
-            params["company_id"] = company_id
-        return _ok(client.get(f"a/{aid}/webhooks.json", params))
-    except CallRailError as e:
-        return _err(e)
-
-
-@mcp.tool()
-def get_webhook(webhook_id: str, account_id: str | None = None) -> str:
-    """Get full detail for one webhook subscription.
-
-    Args:
-        webhook_id: Webhook id (CallRail-assigned).
-    """
-    ok, msg = _require_non_empty(webhook_id, "webhook_id")
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _validate_length(webhook_id, "webhook_id", _MAX_ID_LEN)
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _validate_id_shape(webhook_id, "webhook_id")
-    if not ok:
-        return _err_msg(msg)
-    try:
-        aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/webhooks/{webhook_id}.json"))
-    except CallRailError as e:
-        return _err(e)
+# ---- Removed in v1.2.0 ----
+# `list_webhooks` / `get_webhook` targeted /a/{id}/webhooks.json, which does
+# not exist in CallRail API v3 (live probe 2026-09-07: HTTP 404; the string
+# "webhooks.json" appears nowhere in the API docs). Both tools could only
+# ever return a 404 envelope. CallRail models webhooks as an Integration
+# type, so use `list_integrations(company_id)` / `get_integration` instead.
 
 
 # ============================================================
@@ -3712,58 +3854,87 @@ def create_form_submission(
 
 @mcp.tool()
 def create_outbound_call(
-    from_number: str,
-    to_number: str,
+    caller_id: str,
+    business_phone_number: str,
+    customer_phone_number: str,
     confirm_dialing: bool = False,
-    company_id: str | None = None,
+    recording_enabled: bool | None = None,
+    outbound_greeting_text: str | None = None,
+    outbound_greeting_recording_url: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """⚠️  Place an outbound call. **THIS ACTUALLY DIALS A REAL PHONE.**
+    """Place an outbound call. THIS ACTUALLY DIALS REAL PHONES.
 
-    CallRail will dial `from_number` first; once that's answered, it
-    bridges to `to_number`. Both legs cost minutes against your bundle.
-    Misuse can constitute unlawful telemarketing — verify consent.
+    CallRail dials `business_phone_number` FIRST; once that leg is
+    answered it dials `customer_phone_number` and bridges the two. Both
+    legs cost minutes against your bundle. Misuse can constitute unlawful
+    telemarketing, so verify consent.
+
+    US and Canadian numbers only (CallRail does not support outbound to
+    the UK or Australia via this endpoint).
 
     **You must pass `confirm_dialing=True` to actually place the call.**
-    This is a safety guard against accidental AI-driven cold-calls.
 
     Args:
-        from_number: Your end of the call (typically your tracking number,
-            e.g. `+14129548337`). E.164 format.
-        to_number: Recipient's number. E.164 format.
-        confirm_dialing: REQUIRED — set True to actually dial. Returns
+        caller_id: The number shown to the recipient. Must be one of your
+            CallRail tracking numbers or a verified Outbound Caller ID.
+            E.164 format.
+        business_phone_number: The FIRST leg CallRail dials (your agent's
+            phone). E.164 format.
+        customer_phone_number: The SECOND leg, bridged in once the
+            business leg answers. E.164 format.
+        confirm_dialing: REQUIRED. Set True to actually dial. Returns an
             error envelope if False (default).
-        company_id: Optional company scope.
+        recording_enabled: Record this call.
+        outbound_greeting_text: Text-to-speech greeting played to the
+            customer.
+        outbound_greeting_recording_url: Public URL of an audio greeting,
+            used instead of `outbound_greeting_text`.
         account_id: Auto-resolves if omitted.
 
     Returns: The call object CallRail creates (id, etc.).
+
+    NOTE (v1.2.0): earlier versions sent `{"from", "to"}`, which are not
+    fields CallRail accepts, so every call failed. The parameter names
+    above match the documented request body.
     """
-    ok, msg = _require_non_empty(from_number, "from_number")
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _validate_phone(from_number, "from_number")
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _require_non_empty(to_number, "to_number")
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _validate_phone(to_number, "to_number")
-    if not ok:
-        return _err_msg(msg)
-    if company_id is not None:
-        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+    for value, field in (
+        (caller_id, "caller_id"),
+        (business_phone_number, "business_phone_number"),
+        (customer_phone_number, "customer_phone_number"),
+    ):
+        ok, msg = _require_non_empty(value, field)
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_phone(value, field)
+        if not ok:
+            return _err_msg(msg)
+    if outbound_greeting_text is not None:
+        ok, msg = _validate_length(
+            outbound_greeting_text, "outbound_greeting_text", _MAX_TTS_MESSAGE_LEN,
+        )
         if not ok:
             return _err_msg(msg)
     if not confirm_dialing:
         return _err_msg(
             f"create_outbound_call requires confirm_dialing=True. This places "
-            f"a real phone call from {from_number} to {to_number} — both legs "
-            f"cost minutes and (depending on jurisdiction) may have legal "
-            f"implications. Pass confirm_dialing=True if you intend to dial."
+            f"a real phone call: CallRail dials {business_phone_number} first, "
+            f"then bridges to {customer_phone_number}. Both legs cost minutes "
+            f"and (depending on jurisdiction) may have legal implications. "
+            f"Pass confirm_dialing=True if you intend to dial."
         )
-    body: dict[str, Any] = {"from": from_number, "to": to_number}
-    if company_id:
-        body["company_id"] = company_id
+    body: dict[str, Any] = {
+        "caller_id": caller_id.strip(),
+        "business_phone_number": business_phone_number.strip(),
+        "customer_phone_number": customer_phone_number.strip(),
+    }
+    for key, val in (
+        ("recording_enabled", recording_enabled),
+        ("outbound_greeting_text", outbound_greeting_text),
+        ("outbound_greeting_recording_url", outbound_greeting_recording_url),
+    ):
+        if val is not None:
+            body[key] = val
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.post(f"a/{aid}/calls.json", body))
@@ -4021,11 +4192,27 @@ def list_notifications(
 # 2026-07-03 (read-only probes; see CHANGELOG).
 # ============================================================
 
-# Documented group_by dimensions for /calls/summary.json and
-# /calls/timeseries.json (apidocs.callrail.com). Server 400s on others.
+# group_by dimensions for /calls/summary.json. Taken verbatim from the
+# API's own 400 message (live 2026-09-07): "must be: 'company, company_id,
+# source, keywords, campaign, referrer, landing_page, last_requested_page'".
+# `company_id` and `last_requested_page` were previously rejected client-side
+# despite being valid.
 VALID_CALL_STATS_GROUP_BY: tuple[str, ...] = (
-    "source", "keywords", "campaign", "referrer", "landing_page", "company",
+    "company", "company_id", "source", "keywords",
+    "campaign", "referrer", "landing_page", "last_requested_page",
 )
+
+# Metric names accepted by `fields` on /calls/summary.json and
+# /calls/timeseries.json, per the API's 400 message (live 2026-09-07).
+VALID_CALL_STATS_FIELDS: tuple[str, ...] = (
+    "total_calls", "missed_calls", "answered_calls", "abandoned_calls",
+    "first_time_callers", "average_duration", "formatted_average_duration",
+    "leads",
+)
+
+# /calls/timeseries.json refuses result sets larger than 200 data points.
+_TIMESERIES_MAX_POINTS = 200
+VALID_TIMESERIES_INTERVALS: tuple[str, ...] = ("hour", "day", "week", "month", "year")
 
 
 @mcp.tool()
@@ -4299,33 +4486,67 @@ def call_timeseries(
     end_date: str | None = None,
     company_id: str | None = None,
     fields: str | None = None,
+    interval: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Per-day call volume via CallRail's /calls/timeseries.json — one
-    request for a daily trend line instead of client-side bucketing.
+    """Call volume over time via CallRail's /calls/timeseries.json. One
+    request for a trend line instead of client-side bucketing.
+
+    CallRail refuses any request whose result set would exceed 200 data
+    points. With the default daily interval that caps the window at ~200
+    days; use `interval='week'` or `'month'` for longer ranges. This tool
+    checks the limit before sending so you get a clear message instead of
+    a raw 400.
 
     Args:
         days: Lookback (default 30). Ignored if `start_date` given.
         start_date / end_date: 'YYYY-MM-DD'. Explicit dates win.
         company_id: Filter to one company.
-        fields: Comma-separated metrics (same set as `call_stats`).
+        fields: Comma-separated metrics. Valid: total_calls, missed_calls,
+            answered_calls, abandoned_calls, first_time_callers,
+            average_duration, formatted_average_duration, leads.
+        interval: Bucket size. One of 'hour', 'day', 'week', 'month',
+            'year'. Defaults to CallRail's own choice (daily) when omitted.
         account_id: Auto-resolves if omitted.
 
     Returns:
-        JSON string with `total_results` and `data[]` — one entry per
-        day ({key/date, <metrics>}).
+        JSON string with `total_results` and `data[]`, one entry per
+        bucket ({key/date, <metrics>}).
     """
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
+    if interval is not None and interval not in VALID_TIMESERIES_INTERVALS:
+        return _err_msg(
+            f"interval={interval!r} must be one of {VALID_TIMESERIES_INTERVALS}."
+        )
+    window = _date_window(days, start_date, end_date)
+    if interval in (None, "day", "hour") and window.get("start_date"):
+        try:
+            span = (
+                date.fromisoformat(window["end_date"])
+                - date.fromisoformat(window["start_date"])
+            ).days + 1
+        except ValueError:
+            span = 0
+        points = span * 24 if interval == "hour" else span
+        if points > _TIMESERIES_MAX_POINTS:
+            return _err_msg(
+                f"Requested window spans {points} {'hours' if interval == 'hour' else 'days'}, "
+                f"exceeding CallRail's {_TIMESERIES_MAX_POINTS}-data-point limit "
+                f"for /calls/timeseries.json. Use interval='week' or 'month', "
+                f"or narrow the window."
+            )
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {}
-        params.update(_date_window(days, start_date, end_date))
+        params.update(window)
         if company_id:
             params["company_id"] = company_id
         if fields:
             params["fields"] = fields
+        if interval:
+            params["interval"] = interval
         return _ok(client.get(f"a/{aid}/calls/timeseries.json", params))
     except CallRailError as e:
         return _err(e)

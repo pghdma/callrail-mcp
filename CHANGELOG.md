@@ -7,34 +7,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-07
+
+Audit release. Every item below was confirmed by executing a reproduction
+or by probing the live CallRail API, not by reading code alone.
+
+### Fixed (CRITICAL): package was uninstallable
+
+- **`pip install callrail-mcp` had been completely broken since
+  2026-07-28.** The dependency was declared as an unbounded
+  `mcp>=1.23.0`. MCP Python SDK 2.0 removed `mcp.server.fastmcp`
+  (FastMCP was renamed MCPServer), so every fresh install resolved to
+  mcp 2.x and died at import with `ModuleNotFoundError`. Verified by
+  installing the published 1.1.3 from PyPI into a clean venv.
+  The package now imports `FastMCP` with a fallback to `MCPServer`, so
+  it works on **both** SDK majors rather than pinning users to the old
+  one. CI gained a matrix job that installs each major explicitly.
+
+### Fixed (CRITICAL): filters that silently matched everything
+
+- **`answered` and `source` are not CallRail query parameters.** Both
+  were forwarded on `GET /calls.json` and silently ignored, so
+  `list_calls` returned unfiltered data that looked filtered, and
+  `bulk_update_calls(answered="false", ...)` **wrote to every call in
+  the window** rather than the missed ones. Live proof (2026-09-07):
+  baseline 1105 calls; `answered=true` 1105; `answered=false` 1105;
+  `answered=purple` 1105. The real parameter is `answer_status`, whose
+  values partition correctly (885 answered + 220 missed = 1105).
+  - `answer_status` ('answered' | 'missed' | 'voicemail') is now the
+    documented filter on `list_calls` and `bulk_update_calls`.
+  - `answered` is kept as a deprecated alias that TRANSLATES
+    ('true' to answered, 'false' to missed) instead of being forwarded.
+  - `source` is now applied CLIENT-SIDE with an explicit
+    `source_filter` block in the response, since CallRail has no
+    server-side equivalent. In `bulk_update_calls` the match happens
+    before the 500-cap, so a commit run touches only real matches.
+
+### Fixed (HIGH): request bodies CallRail does not accept
+
+- **`create_outbound_call` sent `{"from", "to"}`**, which are not
+  fields in the documented body, so no outbound call could ever be
+  placed. It now sends `caller_id`, `business_phone_number` and
+  `customer_phone_number` (plus optional `recording_enabled` and
+  greeting fields) and the parameter names reflect the real three-party
+  call flow.
+- **`create_user` / `update_user` sent `company_ids`**; the documented
+  field is `companies`. Company access was silently dropped, and it is
+  required for the manager and reporting roles (reporting is
+  `create_user`'s default).
+- **`create_tracker(type="session")` used the source-tracker schema.**
+  Session pools need top-level `pool_size`, constraints under
+  `pool_numbers`, and a required `source`; nesting `pool_size` inside
+  `tracking_number` returns 400. Session-pool creation had never
+  worked. `pool_size` bounds corrected to CallRail's enforced 4-50.
+- **`update_company(form_capture=...)` sent `form_capture`**, which
+  appears only in responses. The write field is
+  `external_form_capture`, so the toggle was a silent no-op.
+- **`list_webhooks` / `get_webhook` called an endpoint that does not
+  exist** (`/a/{id}/webhooks.json`, live: 404; the string appears
+  nowhere in the API docs). Both tools are removed; webhooks are an
+  Integration type, so use `list_integrations` / `get_integration`.
+  Tool count is now 57.
+
+### Fixed (HIGH): Google Ads attribution logic
+
+- **`call_eligibility_check` treated `source` as an internal slug.**
+  Live values are display names ("Google Ads", "Google Organic",
+  "Google My Business"), so the `startswith("google_")` test never
+  matched and any Google Ads call without a `gclid` was reported as
+  not-from-Google, in the one tool built to debug Google Ads
+  attribution. Matching now handles the display form while still
+  excluding Bing and other sources.
+
+### Fixed (MED): silent truncation and inconsistent aggregation
+
+- **Pagination caps are now reported instead of hidden.** Aggregating
+  tools stop at 50 pages x 250 calls = 12,500 calls per company, while
+  `usage_summary` explicitly claimed "(no truncation)". `paginate()`
+  accepts a `stats` dict, and `call_summary`, `search_calls_by_number`
+  and `usage_summary` surface `scan_truncated` (plus, for
+  `usage_summary`, `scan_truncated_companies`) so a capped figure is
+  never presented as a complete one.
+- **`compare_periods` counted partial data from failed companies** in
+  totals, `by_company` and `biggest_mover`, making a failed fetch look
+  like a real traffic drop. It now excludes them, matching
+  `usage_summary`.
+- **`bulk_update_calls(set_spam=False)` is rejected.** CallRail does
+  not allow un-marking spam via the API, so advertising it was false.
+
+### Changed: enums corrected from the API's own error messages
+
+- `VALID_CALL_STATS_GROUP_BY` gains `company_id` and
+  `last_requested_page` (both valid, both previously rejected
+  client-side). The full set now matches CallRail's 400 message.
+- `call_timeseries` exposes `interval` ('hour' | 'day' | 'week' |
+  'month' | 'year') and rejects windows exceeding CallRail's
+  200-data-point limit before sending, rather than surfacing a raw 400.
+- Added `VALID_CALL_STATS_FIELDS` and `VALID_ANSWER_STATUS`.
+
+### Fixed: packaging and CI
+
+- **sdist no longer sweeps in local working-copy state.** hatchling's
+  default file selection pulled `.claude/` and `.hypothesis/` into
+  source distributions built from a working copy. The sdist now has an
+  explicit include list. (The published 1.1.3 sdist was built by CI
+  from a clean checkout and was not affected.)
+- Removed an inert `[tool.setuptools.package-data]` stanza that had no
+  effect under hatchling, and declared `py.typed` as a wheel artifact
+  explicitly.
+- **CI now enforces what the project claims.** `mypy` was
+  `continue-on-error: true`, which is why it flagged the mcp 2.x
+  import break on 2026-08-01 and CI stayed green. mypy now runs
+  `--strict` and blocks, tests run with `-W error`, bandit runs, the
+  matrix adds Python 3.14, a packaging job asserts `py.typed` ships and
+  no local state leaks, and a weekly scheduled run catches breaking
+  dependency releases like this one.
+- `mypy` config set to `strict = true` to match.
+
+### Documentation
+
+- Developer notes moved to `DEVELOPMENT.md`.
+- README refreshed for the corrected tool surface and rewritten without
+  em dashes; stale "no API equivalent" claim about Outbound Caller IDs
+  corrected (the endpoint exists and is permission-gated).
+
+
 ## [1.1.3] - 2026-07-03
 
-### Fixed — deep-audit round 4: mutation testing + shipped-artifact audit
+### Fixed (deep-audit round 4): mutation testing + shipped-artifact audit
 
-Round 4 turned the audit on the TEST SUITE and the PACKAGING — layers
+Round 4 turned the audit on the TEST SUITE and the PACKAGING, layers
 no code-reading or fuzzing round can reach. A 14-mutant battery
 (deliberate bugs injected into critical lines, one at a time) exposed
 two vacuous regression tests guarding changelog-advertised guarantees:
 
 - **`test_v042_post_does_NOT_retry_on_5xx` never tested its claim.**
-  The fixture builds the client with `max_retries=0` — NOTHING retries
+  The fixture builds the client with `max_retries=0`. NOTHING retries
   in that configuration, so the test passed even with POST added to
   the idempotent-retry set. The CRITICAL double-write guard from
   v0.4.2 (duplicate $3/mo trackers) had zero effective coverage. Now
   runs with retries enabled.
 - **`test_v050_compare_periods_no_overlap` asserted on its own local
-  re-implementation** of the window arithmetic — it never called
+  re-implementation** of the window arithmetic, it never called
   `compare_periods`, so the v0.5.0 double-count fix could regress
   without any test failing. Rewritten end-to-end against the window
   boundaries the tool actually returns.
-- **36500-day cap had no boundary coverage** — a mutant raising the
+- **36500-day cap had no boundary coverage**: a mutant raising the
   cap 1000× survived (the existing test used 10**18, which any large
   cap rejects). Added days=36500/36501 boundary test.
 - 1 equivalent mutant identified and documented (paginate total_pages
-  min-clamp is shadowed by the while-loop bound — differs only in
+  min-clamp is shadowed by the while-loop bound, differs only in
   warning emission). Final score: 13/13 non-equivalent mutants killed.
 
-### Fixed — packaging
+### Fixed (packaging)
 - **`py.typed` was missing from the wheel** (PEP 561). The project
   ships mypy-strict annotations and documents library usage, but
   without the marker downstream type checkers ignore ALL annotations.
@@ -43,7 +168,7 @@ two vacuous regression tests guarding changelog-advertised guarantees:
 
 ### Documentation
 - Docstring Args drift fixed on `update_user` (5 params undocumented),
-  `get_text_message`, `get_webhook` (account_id undocumented) — found
+  `get_text_message`, `get_webhook` (account_id undocumented), found
   by a mechanical docstring-vs-signature sweep across all 59 tools.
 
 ### Verified
@@ -53,7 +178,7 @@ two vacuous regression tests guarding changelog-advertised guarantees:
 
 ## [1.1.2] - 2026-07-03
 
-### Fixed — deep-audit round 3: response-shape fuzz + property-based testing
+### Fixed (deep-audit round 3): response-shape fuzz + property-based testing
 
 Round 2 fuzzed tool INPUTS; round 3 fuzzed what CallRail sends BACK
 (2,891 calls with structurally-valid-but-garbage-typed responses) and
@@ -67,16 +192,16 @@ mechanically verified.
   `spam_detector`, `search_calls_by_number`, `bulk_update_calls`) with
   raw AttributeError on `item.get()`. Non-dict items are skipped with
   a warning.
-- **`call_eligibility_check`** — wrong-typed `utm_source`/`source`/
+- **`call_eligibility_check`**: wrong-typed `utm_source`/`source`/
   `source_name` crashed `.lower()`; now safely coerced.
-- **`search_calls_by_number`** — non-string `customer_phone_number` in
+- **`search_calls_by_number`**: non-string `customer_phone_number` in
   a call record crashed `_digits_only`; now skipped.
 
 #### Hypothesis findings (property-based, permanent in
 tests/test_properties.py)
-- **`_date_window` OverflowError — reachable in production.** A
+- **`_date_window` OverflowError, reachable in production.** A
   valid-format ancient end_date (e.g. "0001-01-01") minus a large
-  `days` lookback lands before year 1, which `date` cannot represent —
+  `days` lookback lands before year 1, which `date` cannot represent,
   `list_calls(days=36500, end_date="0001-01-01")` crashed with a raw
   OverflowError despite the 36500-day cap. Now clamped to date.min.
 - **Money invariant now machine-verified**: per-company cost shares in
@@ -87,19 +212,19 @@ tests/test_properties.py)
   [0, 60] and finite; `_is_toll_free` and `_date_window` are total
   functions over garbage.
 
-### Added — tests
-- `tests/test_properties.py` — 6 hypothesis property suites.
+### Added: tests
+- `tests/test_properties.py`: 6 hypothesis property suites.
 - 4 targeted regressions (ancient end_date, paginate non-dict skip,
   wrong-typed eligibility fields, non-string phone field).
 - Tests 385 → 395.
 
 ## [1.1.1] - 2026-07-03
 
-### Fixed — deep-audit round 2: all-tool adversarial fuzz
+### Fixed (deep-audit round 2): all-tool adversarial fuzz
 
 A mechanical fuzz pass (every tool × every parameter × 17 garbage
 values ≈ 5,000 calls) found **1,051 violations** of the project's core
-error contract ("tools never raise — always return a JSON envelope").
+error contract ("tools never raise, always return a JSON envelope").
 Root cause: the shared validators assumed string inputs; any non-string
 type (int, list, bytes, bool, float) sent by a loose-JSON MCP client
 for a string field crashed with raw TypeError/AttributeError across
@@ -107,46 +232,46 @@ essentially all 59 tools. Prior releases fuzzed only tracker tools, so
 the class went unseen.
 
 #### Shared-validator hardening (fixes ~all 1,051 at the root)
-- `_require_non_empty` — rejects non-string types with a clear
+- `_require_non_empty`: rejects non-string types with a clear
   "must be a string (got int)" envelope instead of passing them
   through to crash downstream.
 - `_validate_id_shape`, `_validate_date`, `_validate_phone`,
   `_validate_email`, `_validate_length`, `_validate_area_code`,
-  `_validate_pool_size` — explicit type guards.
-- `_clamp_per_page` — coerces numeric strings ("250"), returns 1 on
+  `_validate_pool_size`, explicit type guards.
+- `_clamp_per_page`: coerces numeric strings ("250"), returns 1 on
   garbage (previously raw TypeError from the `<` comparison).
-- New `_clamp_page` — replaces 13 inline `max(1, page)` call sites
+- New `_clamp_page`: replaces 13 inline `max(1, page)` call sites
   that raised TypeError on string/None pages.
-- `_clean_tag_list` — non-list input returns [] with a warning
+- `_clean_tag_list`: non-list input returns [] with a warning
   (mirrors `_tag_names_from`; previously iterated ints → TypeError).
 - `update_call` / `update_form_submission` / `create_form_submission`
-  — `tags` type-checked as list before `len()`.
-- `call_eligibility_check` — threshold coerced before the `< 0`
+ , `tags` type-checked as list before `len()`.
+- `call_eligibility_check`: threshold coerced before the `< 0`
   comparison (None/"60" previously raised TypeError).
 
 #### Behavior kept honest with docstrings
-- `delete_tag(tag_id=812)` (int form) now works — the docstring has
+- `delete_tag(tag_id=812)` (int form) now works, the docstring has
   promised "accepts string or numeric forms" since v0.6.1 but int
   input crashed with TypeError. get_tag/update_tag same.
-- `search_calls_by_number(phone_number=4125551234)` — a phone number
+- `search_calls_by_number(phone_number=4125551234)`: a phone number
   arriving as a JSON number is now coerced instead of crashing.
 
 #### Wire safety
 - **NaN/Infinity rejected in `value` params** (`update_form_submission`,
   `create_form_submission`, `update_sms_thread`). `json.dumps`
-  serializes non-finite floats as bare `NaN`/`Infinity` tokens —
+  serializes non-finite floats as bare `NaN`/`Infinity` tokens,
   invalid JSON on the wire to CallRail.
 
 #### Response-shape robustness (client.py)
-- `paginate()` — a malformed response with a STRING where the items
+- `paginate()`: a malformed response with a STRING where the items
   array belongs would `yield from` single characters; consumers then
   crashed on `'str'.get()`. Non-list items now stop pagination with
   a warning.
-- `resolve_account_id()` — `accounts` as a dict raised raw
+- `resolve_account_id()`: `accounts` as a dict raised raw
   `KeyError: 0`; now a catchable CallRailError.
 
-### Added — tests
-- **`tests/test_fuzz_all_tools.py`** — the full adversarial matrix
+### Added: tests
+- **`tests/test_fuzz_all_tools.py`**: the full adversarial matrix
   (59 tools × every param × 17 garbage values, ~5k calls) is now a
   permanent regression test pinning the never-raise invariant.
 - 6 targeted regressions (paginate string-items, dict accounts,
@@ -155,33 +280,33 @@ the class went unseen.
 
 ## [1.1.0] - 2026-07-03
 
-### Added — 9 new tools (API caught up with us, so we caught up with it)
+### Added: 9 new tools (API caught up with us, so we caught up with it)
 
 CallRail shipped substantial API surface between April and July 2026.
 All endpoint shapes below were live-verified against a production
 account on 2026-07-03 (read-only probes) before implementation.
 
-- **`list_leads`** / **`get_lead_timeline`** — CallRail's deduplicated
+- **`list_leads`** / **`get_lead_timeline`**: CallRail's deduplicated
   person records + full cross-channel history (calls, forms, texts)
   per lead with first/last-touch attribution. Replaces the manual
   "search calls by number + search forms by email" reconstruction.
 - **`list_sms_threads`** / **`get_sms_thread`** / **`update_sms_thread`**
-  — SMS-thread lead management. `update_sms_thread` closes the write
+ . SMS-thread lead management. `update_sms_thread` closes the write
   gap where texting leads couldn't be tagged / noted / qualified via
   API (notes, value, tags with `append_tags`, lead_qualification).
-- **`call_stats`** — server-side aggregation via `/calls/summary.json`
+- **`call_stats`**: server-side aggregation via `/calls/summary.json`
   (group_by source/keywords/campaign/referrer/landing_page/company).
   One request instead of paginating every call.
-- **`call_timeseries`** — per-day call-volume trend via
+- **`call_timeseries`**: per-day call-volume trend via
   `/calls/timeseries.json`.
-- **`form_stats`** — server-side form totals via `/forms/summary.json`.
-- **`get_call_page_views`** — the visitor's page-view journey behind a
+- **`form_stats`**: server-side form totals via `/forms/summary.json`.
+- **`get_call_page_views`**: the visitor's page-view journey behind a
   call; pairs with `call_eligibility_check` for conversion debugging.
 
-### Changed — validators updated to CallRail's newly-published enums
+### Changed: validators updated to CallRail's newly-published enums
 
 CallRail has now documented enums we originally discovered empirically
-— and our fail-fast validation had become over-restrictive:
+and our fail-fast validation had become over-restrictive:
 
 - **`VALID_TAG_COLORS`: 10 → 24 values.** The docs now publish the full
   24-color table; our 10-value tuple was rejecting 14 documented-valid
@@ -192,11 +317,11 @@ CallRail has now documented enums we originally discovered empirically
   `search`, `mobile_ad_extension`) and the 2 production-proven values
   the docs still omit (`facebook_all`, `bing_all`).
 
-### Changed — transcript gating (CallRail breaking change 2026-05-21)
+### Changed: transcript gating (CallRail breaking change 2026-05-21)
 
 - **`get_call_transcript` 404s now carry a disambiguation hint.**
   CallRail's 2026-05-21 API change gates transcript data behind
-  Premium Conversation Intelligence — without it the endpoint 404s
+  Premium Conversation Intelligence, without it the endpoint 404s
   even when a transcript exists in the UI. The error envelope now
   explains both possible causes instead of returning a bare 404.
 
@@ -211,7 +336,7 @@ CallRail has now documented enums we originally discovered empirically
   needs A2P registration, message flows + integration filters
   documented-but-403).
 
-### Added — tests
+### Added: tests
 
 - 14 new tests (306 → 320): all 9 new tools (happy paths + validation
   rejections + PUT body shape), enum expansion guards, transcript-404
@@ -219,16 +344,16 @@ CallRail has now documented enums we originally discovered empirically
 
 ## [1.0.4] - 2026-07-03
 
-Not published to PyPI — these fixes ship in 1.1.0. (The version number
+Not published to PyPI, these fixes ship in 1.1.0. (The version number
 1.0.4 was consumed by an MCP-registry manifest metadata bump: title +
 corrected tool count; the registry rejects re-publishing a version.)
 
-### Fixed (fresh-eyes audit — 5 bugs, 1 HIGH)
+### Fixed (fresh-eyes audit, 5 bugs, 1 HIGH)
 
 #### HIGH
 - **`_date_window` silently discarded an explicit `end_date`** when no
   `start_date` was given. `list_calls(end_date="2026-06-01")` returned
-  the window ending TODAY — the caller's end_date was overwritten by the
+  the window ending TODAY, the caller's end_date was overwritten by the
   `days`-lookback branch, violating the documented "explicit dates
   always win" contract. Wrong data, no error. Affected `list_calls`,
   `call_summary`, `list_form_submissions`, `list_text_messages`,
@@ -239,7 +364,7 @@ corrected tool count; the registry rejects re-publishing a version.)
 - **`bulk_update_calls(days="7", ...)` raised an uncaught `TypeError`**
   (str < int) in the at-least-one-filter check, which runs BEFORE
   `_validate_window`'s coercion. Loose-JSON MCP clients sending string
-  days crashed the tool reply instead of getting an error envelope —
+  days crashed the tool reply instead of getting an error envelope,
   the same bug class fixed in v0.4.7 (`_date_window`) and v0.5.3
   (`spam_detector` cap), missed in this one remaining raw comparison.
 - **`compare_periods(days="30")` spuriously rejected a valid value**
@@ -254,24 +379,24 @@ corrected tool count; the registry rejects re-publishing a version.)
   Tool bodies only catch `CallRailError`, so this would have crashed the
   MCP reply. Now coerced defensively; uncoercible values fall back to
   stop-on-empty-page.
-- **`create_tag` had zero input validation** — the only write tool with
+- **`create_tag` had zero input validation**: the only write tool with
   none. `create_tag(name="", company_id="")` burned the account-resolve
   API call before failing server-side. Now: non-empty name (255-char
   cap), non-empty company_id with 'COM' prefix shape check.
 
 ### Added
-- **`list_companies(page=...)`** — agencies with more than `per_page`
+- **`list_companies(page=...)`**: agencies with more than `per_page`
   companies previously had no way to reach page 2 through this tool
   (every sibling list tool already had `page`).
 
 ### Documentation
 - **`update_notification` docstring listed alert_type values that don't
-  exist** ('call_completed', 'call_missed', 'first_time_caller', ...) —
+  exist** ('call_completed', 'call_missed', 'first_time_caller', ...),
   contradicting `VALID_NOTIFICATION_ALERT_TYPES`. Following the docstring
   triggered spurious "not in known set" warnings. Now lists the real
   known set (same as `create_notification`).
 
-### Added — tests
+### Added: tests
 - 9 new regression tests (297 → 306): end_date anchoring (+ no-dates
   regression guard), string-days on bulk_update_calls / compare_periods
   (accept + cap-hold), paginate total_pages coercion (+ garbage
@@ -283,11 +408,11 @@ corrected tool count; the registry rejects re-publishing a version.)
 
 - Bump dependency floors to fix 6 known CVEs flagged by supply-chain
   scanners against the previous minimum-version floors:
-  - `mcp>=1.23.0` (was `>=1.2.0`) — fixes CVE-2025-53366,
+  - `mcp>=1.23.0` (was `>=1.2.0`), fixes CVE-2025-53366,
     CVE-2025-53365, CVE-2025-66416
-  - `requests>=2.33.0` (was `>=2.31.0`) — fixes CVE-2024-35195,
+  - `requests>=2.33.0` (was `>=2.31.0`), fixes CVE-2024-35195,
     CVE-2024-47081, CVE-2026-25645
-- No code changes — fresh installs already pulled the patched
+- No code changes, fresh installs already pulled the patched
   versions; this just makes the lower bound safe so audit tools
   (pip-audit, mcp-marketplace) stop flagging the package.
 
@@ -302,7 +427,7 @@ corrected tool count; the registry rejects re-publishing a version.)
   `get_call_recording`, `get_call_transcript`, `get_form_submission`,
   `update_notification`, `delete_notification`, `add_call_tags`,
   `delete_tag`, `update_company`, `get_user`. Functional behavior
-  unchanged — pure documentation improvement.
+  unchanged, pure documentation improvement.
 - Added `glama.json` declaring maintainers, fixing the "No glama.json"
   red flag on the Glama listing.
 
@@ -312,28 +437,28 @@ corrected tool count; the registry rejects re-publishing a version.)
 
 - Added `<!-- mcp-name: io.github.pghdma/callrail-mcp -->` ownership marker
   to README so the package can be claimed in the official MCP Registry
-  (`registry.modelcontextprotocol.io`). No code changes — README + version
+  (`registry.modelcontextprotocol.io`). No code changes. README + version
   bump only so the marker shows up on PyPI.
 
 ## [1.0.0] - 2026-04-24
 
-### First stable release — published to PyPI
+### First stable release, published to PyPI
 
 `pip install callrail-mcp` now works.
 
 This release locks the feature surface at **49 tools, ~85% of the
 CallRail REST API v3**. The remaining 15% is documented as out-of-scope
 in the README and CLAUDE.md (either CallRail-account-permission-gated
-or UI-only on standard plans). No code changes vs v0.7.0 — version
+or UI-only on standard plans). No code changes vs v0.7.0, version
 bump only, plus README cleanup for the PyPI launch.
 
 ### Out of scope (will work on when feasible)
 
 **Blocked by CallRail account permissions** (returns 403 for standard
 accounts; verified live 2026-04-24):
-- Send SMS (`POST /text-messages.json`) — needs A2P SMS registration
+- Send SMS (`POST /text-messages.json`), needs A2P SMS registration
 - Webhook integration CRUD (`POST /integrations.json` with `type=Webhook`)
-  — needs Integration-Admin permission
+ , needs Integration-Admin permission
 
 **Not exposed by CallRail's REST API** (UI-only on standard plans):
 - Outbound Caller IDs verification
@@ -362,7 +487,7 @@ period:
 
 ## [0.7.0] - 2026-04-24
 
-### Added — 8 new tools (final API parity push)
+### Added (8): new tools (final API parity push)
 
 API surface coverage now ~85% (up from 75% in v0.6.x). The remaining
 ~15% is either deliberately not exposed by CallRail (UI-only) or
@@ -370,31 +495,31 @@ gated behind account permissions our standard API key doesn't have
 (see CLAUDE.md "API coverage limits").
 
 #### Tools shipped
-- **`get_tag(tag_id)`** — single tag detail. Completes tag CRUD.
-- **`list_integrations(company_id)`** — discover GMB / Google Ads /
+- **`get_tag(tag_id)`**: single tag detail. Completes tag CRUD.
+- **`list_integrations(company_id)`**: discover GMB / Google Ads /
   Facebook / Slack / Webhook integrations attached to a company.
   Account-level listing isn't supported (CallRail returns 400).
-- **`get_integration(integration_id)`** — single-record detail.
+- **`get_integration(integration_id)`**: single-record detail.
 - **`create_form_submission(company_id, referrer, referring_url,
-  landing_page_url, ...)`** — manually create a form submission for
+  landing_page_url, ...)`**, manually create a form submission for
   backfilling offline leads (walk-ins, paper forms, etc.). All 3 of
   referrer/referring_url/landing_page_url required by CallRail.
 - **`create_outbound_call(from_number, to_number, confirm_dialing=False)`**
-  — place an outbound call. **Mirrors `create_tracker`'s safety
+ , place an outbound call. **Mirrors `create_tracker`'s safety
   pattern**: requires `confirm_dialing=True` because it actually places
   a real phone call (legal implications + minute cost).
 - **`list_notifications`** / **`create_notification`** /
-  **`update_notification`** / **`delete_notification`** — full CRUD on
+  **`update_notification`** / **`delete_notification`**, full CRUD on
   per-user alert rules (who gets pinged on which call/text/form event).
 
 ### Discovered + documented (NOT shipped)
 
 Probed live and confirmed permission-gated:
 - **`POST /text-messages.json`** (send SMS) returns 403 on standard
-  CallRail accounts — needs A2P SMS registration / dedicated SMS API
+  CallRail accounts, needs A2P SMS registration / dedicated SMS API
   permission. CallRail enforces TCPA-compliance keywords on outbound.
 - **`POST /integrations.json`** (create webhook integration) returns
-  403 — needs Integration-Admin permission.
+  403, needs Integration-Admin permission.
 
 CallRail does NOT expose the following via API (UI-only):
 - Outbound Caller IDs verification flow
@@ -406,16 +531,16 @@ CallRail does NOT expose the following via API (UI-only):
 CLAUDE.md now has an "API coverage limits" section documenting all
 of the above so future contributors don't waste time re-discovering.
 
-### Added — tests
+### Added: tests
 - 13 new tests (284 → 297 total).
 
 ### Verified clean
-- `mypy --strict`, `ruff`, `pytest -W error`, `bandit`, `pyright` —
+- `mypy --strict`, `ruff`, `pytest -W error`, `bandit`, `pyright`,
   all 5 check tools clean.
 
 ## [0.6.1] - 2026-04-24
 
-### Fixed (audit on v0.6.0 — 9 findings, 2 HIGH)
+### Fixed (audit on v0.6.0, 9 findings, 2 HIGH)
 
 #### HIGH
 - **`create_company` was force-sending all 6 optional boolean toggles
@@ -445,7 +570,7 @@ of the above so future contributors don't waste time re-discovering.
 - **`get_company` docstring** now documents that disabled-record
   responses (status="disabled") are returned NOT 404'd.
 
-### Added — tests
+### Added: tests
 
 - 4 new tests (280 → 284):
   - `create_user(role="")` rejected
@@ -455,44 +580,44 @@ of the above so future contributors don't waste time re-discovering.
 
 ## [0.6.0] - 2026-04-24
 
-### Added — 12 new tools (API-parity push)
+### Added (12): new tools (API-parity push)
 
 Increases CallRail v3 API surface coverage from ~50% to ~75%. Fills
 the biggest gaps an agency owner would hit during day-to-day use.
 
 #### Companies CRUD
-- **`get_company(company_id)`** — single-record fetch.
-- **`create_company(name, time_zone, ...)`** — new client onboarding.
+- **`get_company(company_id)`**: single-record fetch.
+- **`create_company(name, time_zone, ...)`**: new client onboarding.
   Free (CallRail bills per number, not per company). Defaults match
   observed live shapes (TZ "America/New_York", lead_scoring_enabled
   True).
-- **`update_company(company_id, ...)`** — change name, TZ, scoring
+- **`update_company(company_id, ...)`**: change name, TZ, scoring
   features. Empty-string fields rejected.
-- **`delete_company(company_id)`** — soft-delete (status flips to
+- **`delete_company(company_id)`**: soft-delete (status flips to
   "disabled", data retained). Mirrors `delete_tracker` semantics.
 
 #### Users CRUD
-- **`get_user(user_id)`** — single-record fetch.
-- **`create_user(email, first_name, last_name, role, company_ids)`** —
+- **`get_user(user_id)`**: single-record fetch.
+- **`create_user(email, first_name, last_name, role, company_ids)`**,
   invites a new user (CallRail emails them). Validates email format,
   warns on unknown roles. Common roles: admin / manager / reporting /
   analyst.
-- **`update_user(user_id, ...)`** — mutate email/name/role/companies.
-- **`delete_user(user_id)`** — hard-removes user from account
+- **`update_user(user_id, ...)`**: mutate email/name/role/companies.
+- **`delete_user(user_id)`**: hard-removes user from account
   (different from companies/trackers which soft-delete).
 
 #### Singletons (filling missing get-one endpoints)
-- **`get_form_submission(submission_id)`** — was list+update only.
-- **`get_text_message(conversation_id)`** — was list-only. Conv IDs
+- **`get_form_submission(submission_id)`**: was list+update only.
+- **`get_text_message(conversation_id)`**: was list-only. Conv IDs
   are short alphanumeric strings (e.g. `"8hw3p"`), no prefix.
 
 #### Webhooks (read-only for v0.6.0)
-- **`list_webhooks(company_id?)`** — discover existing webhooks.
-- **`get_webhook(webhook_id)`** — single-record detail.
-- (CRUD deferred to v0.6.1 — request body shapes need live API
+- **`list_webhooks(company_id?)`**: discover existing webhooks.
+- **`get_webhook(webhook_id)`**: single-record detail.
+- (CRUD deferred to v0.6.1, request body shapes need live API
   verification before shipping create/update/delete.)
 
-### Added — tests
+### Added: tests
 - 29 new tests (251 → 280). Coverage maintained at 84%.
 
 ### Deferred to v0.6.1
@@ -515,7 +640,7 @@ v0.5.x bug floor.
 
 ## [0.5.3] - 2026-04-24
 
-### Fixed (round 4 audit on v0.5.2 — 4 findings, converging)
+### Fixed (round 4 audit on v0.5.2, 4 findings, converging)
 
 #### MEDIUM
 - **`spam_detector` 90-day cap was bypassable via string input.**
@@ -541,13 +666,13 @@ v0.5.x bug floor.
 ### Trend
 Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
 
-### Added — tests
+### Added: tests
 - 1 new test (250 → 251):
   - `spam_detector(days="365")` now correctly rejected by the 90 cap
 
 ## [0.5.2] - 2026-04-24
 
-### Fixed (round 3 audit on v0.5.1 — 8 findings)
+### Fixed (round 3 audit on v0.5.1, 8 findings)
 
 #### HIGH
 - **`_tag_names_from` accepted non-list iterables**, silently corrupting
@@ -589,7 +714,7 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
   (list iteration order, not dict).
 - `bulk_update_calls` per-call GET 404 handling is loud (not silent).
 
-### Added — tests
+### Added: tests
 
 - 3 new unit tests (247 → 250 total):
   - `_tag_names_from` rejects non-list inputs (str, dict, int) with warnings
@@ -598,7 +723,7 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
 
 ## [0.5.1] - 2026-04-24
 
-### Fixed (v0.5.0 round 2 audit — 11 findings)
+### Fixed (v0.5.0 round 2 audit, 11 findings)
 
 #### MEDIUM
 - **`spam_detector` was sending `[None, "tag"]`** when an existing call
@@ -612,7 +737,7 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
   and `partial_minutes_before_failure` so under-counting is observable.
 - **`bulk_update_calls` had a TOCTOU tag race**. The commit phase
   trusted the (potentially minutes-old) tags from the matched list
-  result — a concurrent caller's tag write between list-time and
+  result, a concurrent caller's tag write between list-time and
   commit-time would be silently overwritten. Now re-GETs fresh tags
   per call before merging (mirrors `spam_detector` / `add_call_tags`
   pattern).
@@ -621,7 +746,7 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
   `likely_spam_returned`, `likely_spam_truncated` fields so callers
   know when more exists.
 - **`bulk_update_calls` and `spam_detector` commit loops only caught
-  `CallRailError`** — an unexpected exception (e.g. from a future
+  `CallRailError`**, an unexpected exception (e.g. from a future
   client refactor) would abort the loop with no audit trail of what
   was already committed. Now also catch broad `Exception` per call,
   recording each in `failures[]`.
@@ -632,16 +757,16 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
   with the now-fixed commit-path filter).
 - **`_pick_account_tz` warns on legacy TZ names** like `"EST"`/`"PST"`
   (which `zoneinfo.ZoneInfo` accepts but treats as fixed offsets, no
-  DST — day boundaries drift 1 hour for half the year).
+  DST, day boundaries drift 1 hour for half the year).
 - **`_pick_account_tz` warns when an agency has multiple TZs** across
   active companies (multi-region MSPs); previously picked first
   non-deterministically.
-- **`compare_periods` `biggest_mover`** was just a name — couldn't
+- **`compare_periods` `biggest_mover`** was just a name, couldn't
   tell from the response whether the mover went up or down. Now an
   object with `name`, `direction` (`up`/`down`/`flat`),
   `minutes_delta`, `minutes_pct_change`.
 
-### Added — tests
+### Added: tests
 
 - 4 new unit tests (243 → 247 total):
   - `_tag_names_from` filters dicts-without-name + non-strings
@@ -655,26 +780,26 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
 
 ## [0.5.0] - 2026-04-24
 
-### Added — 3 new agency workflow tools
+### Added (3): new agency workflow tools
 
-- **`compare_periods(days=30)`** — Month-over-month (or any-window-over-
+- **`compare_periods(days=30)`**: Month-over-month (or any-window-over-
   previous-equivalent-window) delta analysis. Returns per-company minute
   and call deltas, percentage changes, and biggest mover. Built to catch
   traffic trends before they become invoice surprises. Cap: 365 days.
-- **`bulk_update_calls(filter=..., set=..., dry_run=True)`** — Apply the
+- **`bulk_update_calls(filter=..., set=..., dry_run=True)`**: Apply the
   same update (tag, note, lead_status, spam flag) to every call matching
   a filter in one tool call. Replaces dozens of sequential `update_call`
   calls. **`dry_run=True` by default**: returns a preview of which calls
   would be updated. Hard cap of 500 calls per invocation; silent
   truncation is surfaced via `truncated_at_cap: true` flag.
-- **`spam_detector(days=30, auto_tag=False)`** — Heuristic spam scoring
+- **`spam_detector(days=30, auto_tag=False)`**: Heuristic spam scoring
   (duration, answered, first-call, repeat-caller). Flags calls with
   score ≥ 3. Optional `auto_tag=True` (requires `company_id` for safety)
   adds `auto_detected_spam` tag to flagged calls. Deliberately does NOT
-  mark `spam=True` — CallRail hides spam-flagged calls from default
+  mark `spam=True`. CallRail hides spam-flagged calls from default
   GETs, so tagging is reviewable; user can spam-flag manually after.
 
-### Changed — `_date_window` is now timezone-aware
+### Changed (`_date_window`): is now timezone-aware
 
 - `_date_window(tz="America/New_York")` uses the account's IANA timezone
   for the "today" boundary instead of UTC. `usage_summary` and
@@ -683,7 +808,7 @@ Rounds 2→3→4 found 11→8→4 bugs. Converging toward the floor.
   instead of issuing a separate request.
 
 Previously, a user in ET asking for `days=1` at 5 PM ET (= 10 PM UTC)
-would get 1 UTC day — which could misalign with their actual business
+would get 1 UTC day, which could misalign with their actual business
 day at month boundaries. Now the windows match the account's wall
 clock.
 
@@ -710,7 +835,7 @@ Running the audit-and-fix loop on v0.5.0's own code surfaced 8 issues:
 - **LOW**: Removed dead `_get_account_timezone` helper in favor of
   `_pick_account_tz` which reuses already-fetched companies.
 
-### Added — tests
+### Added: tests
 
 - 13 new tests (230 → 243 total):
   - `compare_periods`: happy path, invalid-days rejection, window
@@ -739,17 +864,17 @@ Running the audit-and-fix loop on v0.5.0's own code surfaced 8 issues:
 
 ## [0.4.7] - 2026-04-24
 
-### Fixed (audit pass 13 + 14 — approaching the bug floor)
+### Fixed (audit pass 13 + 14, approaching the bug floor)
 
 Pass 13 ran bandit (security scanner), pyright (alternate type-checker),
-and a docstring-accuracy agent — all three reported ZERO code defects.
+and a docstring-accuracy agent, all three reported ZERO code defects.
 Only documentation drift. Pass 14 ran one more round with a different
 lens and caught one HIGH-severity defect.
 
-#### HIGH — discovered in round 14 (final lens)
+#### HIGH, discovered in round 14 (final lens)
 - **`_date_window` crashed on string `days`**. `_validate_window` coerced
   string `days` to int locally (added v0.4.3) but only returned `(ok, msg)`
-  — the coerced value was thrown away. `_date_window` then received the
+ , the coerced value was thrown away. `_date_window` then received the
   original string and raised `TypeError: '>' not supported between str and
   int`. Reachable via every tool accepting `days` (list_calls, call_summary,
   usage_summary, list_form_submissions, list_text_messages,
@@ -769,7 +894,7 @@ lens and caught one HIGH-severity defect.
 - `update_call` / `update_form_submission` docstrings now list length caps
   (`note` 4000, `customer_name` 200, `tags` 100-entry max).
 - README `update_form_submission` row clarified: "same field surface as
-  update_call PLUS `value` (not supported on update_call — returns 500)".
+  update_call PLUS `value` (not supported on update_call, returns 500)".
 
 ### Clean across 4 independent check tools
 - `pytest -W error` (warnings as errors): clean
@@ -778,16 +903,16 @@ lens and caught one HIGH-severity defect.
 - `bandit`: 1 LOW (intentional `assert` for type narrowing)
 - `pyright`: only missing-source-stub warnings for third-party deps
 
-### Added — tests
+### Added: tests
 - 2 new regression tests (227 → 229):
   - `_date_window` coerces string `days` + garbage-falls-back-to-no-window
   - `list_calls(days="7")` end-to-end doesn't crash
 
 ## [0.4.6] - 2026-04-24
 
-### Fixed (audit pass 12 — 5 bugs incl. 1 HIGH)
+### Fixed (audit pass 12, 5 bugs incl. 1 HIGH)
 
-#### HIGH — silent data loss on partial pagination failure
+#### HIGH, silent data loss on partial pagination failure
 - **`usage_summary` partial-failure path was dropping accumulated
   call data**. If a company's call pagination succeeded for pages 1-2
   (250 calls each = 500 calls = ~$25 of overage) but then failed on
@@ -815,7 +940,7 @@ lens and caught one HIGH-severity defect.
 - `mypy --strict` passes
 - ruff lint clean
 
-### Added — tests
+### Added: tests
 
 - 4 new unit tests (223 → 227 total):
   - Partial-failure surfaces accumulated data
@@ -825,12 +950,12 @@ lens and caught one HIGH-severity defect.
 
 ## [0.4.5] - 2026-04-24
 
-### Fixed (audit pass 11 — diminishing returns territory, but still 6 bugs)
+### Fixed (audit pass 11, diminishing returns territory, but still 6 bugs)
 
 - **`call_eligibility_check` source detection had a dead clause + missed
   bare `source="google"`** (F2). The redundant `source_slug == "google_my_business"`
   was already covered by the `startswith("google_")` check. And bare `"google"`
-  (no underscore — rare but valid CallRail slug) was missed entirely.
+  (no underscore, rare but valid CallRail slug) was missed entirely.
 - **`usage_summary` companies list was unpaginated** (F11) → silently
   truncated agencies with >250 active companies. Now uses `client.paginate`.
 - **`paginate()` blindly trusted server-reported `total_pages`** (F3).
@@ -840,7 +965,7 @@ lens and caught one HIGH-severity defect.
   (F12). Replaced with a comment documenting the limitation (we don't
   yet differentiate per-call pricing by tracker number type).
 
-### Added — tests
+### Added: tests
 
 - 3 new unit tests (220 → 223 total):
   - `paginate()` defensive cap on runaway `total_pages`
@@ -851,7 +976,7 @@ lens and caught one HIGH-severity defect.
 
 ## [0.4.4] - 2026-04-24
 
-### Fixed (audit pass 10 — adversarial fuzzing + cross-tool consistency)
+### Fixed (audit pass 10, adversarial fuzzing + cross-tool consistency)
 
 3 parallel audit angles (own-code review, adversarial input fuzzing,
 cross-tool consistency) surfaced 20+ findings. Fixed the 13
@@ -867,7 +992,7 @@ highest-impact.
   (`unicodedata.category()`).
 - **`call_eligibility_check` was reading the wrong field for source
   detection**. Used `source_name` (user-editable display string,
-  e.g. "Bing Ads (Google legacy import)") for substring match —
+  e.g. "Bing Ads (Google legacy import)") for substring match,
   would falsely classify Bing calls as Google. Now uses CallRail's
   internal `source` slug (e.g. `google_paid`, `bing_paid`).
 - **`_is_toll_free` mis-classified NANP toll-free with extensions**.
@@ -899,12 +1024,12 @@ highest-impact.
   before `.get()` (was: AttributeError if CallRail returned a list
   of strings).
 - API key file permission warning skipped on Windows (NTFS doesn't
-  have POSIX mode bits — warning fired every load).
+  have POSIX mode bits, warning fired every load).
 - Largest-remainder rounding loop cycles through indices when
   `abs(residual) > len(per_company)` (defensive against future
   pricing arithmetic that might exceed N cents drift).
 
-### Added — tests
+### Added: tests
 
 - 16 new unit tests (204 → 220 total):
   - 5-row parametrized matrix on Unicode-invisible-char rejection in IDs
@@ -920,7 +1045,7 @@ highest-impact.
 
 ## [0.4.3] - 2026-04-24
 
-### Fixed (audit pass 9 — meta-audit on what passes 1-8 missed)
+### Fixed (audit pass 9, meta-audit on what passes 1-8 missed)
 
 A meta-audit looking specifically at categories prior passes likely
 skipped (race conditions, logging hygiene, timezone bugs, float
@@ -965,7 +1090,7 @@ highest-impact + closed major coverage gaps.
   warning in `resolve_account_id` by explicitly checking the type of
   `accounts[0]["id"]` before returning.
 
-### Added — tests
+### Added: tests
 
 - 21 new unit tests (183 → 204 total):
   - 13 happy-path tests for previously-uncovered tools:
@@ -993,7 +1118,7 @@ Coverage: 72% → 84% overall, server.py 67% → 82%.
 
 ## [0.4.2] - 2026-04-24
 
-### Fixed (audit pass 6 — sweep of previously-untouched code)
+### Fixed (audit pass 6, sweep of previously-untouched code)
 
 A focused audit pass on the older tools (call CRUD, tag CRUD, form
 CRUD, read tools) and the HTTP client layer surfaced 30+ findings.
@@ -1001,7 +1126,7 @@ Highest-impact 12 fixed in this release.
 
 #### CRITICAL
 - **POST retries on 5xx could create duplicate trackers.** A 502 on
-  `create_tracker` would trigger up to 3 retries — if CallRail had
+  `create_tracker` would trigger up to 3 retries, if CallRail had
   actually processed the original request and just lost the response,
   the retries would produce 2-4 trackers ($3/mo each, charged forever).
   Fix: 5xx-retry policy now restricted to **idempotent methods** (GET,
@@ -1023,7 +1148,7 @@ Highest-impact 12 fixed in this release.
   prefix where applicable).
 - **`update_call` / `update_form_submission` accepted empty-string
   optional fields** (`note=""`, `customer_name="   "`), which
-  CallRail interprets as "clear this field" — almost always a mistake.
+  CallRail interprets as "clear this field", almost always a mistake.
   Now rejected with a clear error.
 
 #### MEDIUM
@@ -1040,7 +1165,7 @@ Highest-impact 12 fixed in this release.
   `_clamp_per_page`** (didn't floor at 1) and didn't clamp `page≥1`.
   Now consistent with sibling listing tools.
 
-### Added — tests
+### Added: tests
 
 - 24 new unit tests (159 → 183 total):
   - 15-row parametrized matrix covering ID validation across every
@@ -1064,7 +1189,7 @@ Highest-impact 12 fixed in this release.
 - Enum validation for `lead_status` (could break for accounts using
   custom lead-status values).
 - `resolve_account_id()` validation of caller-supplied IDs (would
-  add a HEAD request to every call — not worth the latency).
+  add a HEAD request to every call, not worth the latency).
 
 ## [0.4.1] - 2026-04-24
 
@@ -1073,14 +1198,14 @@ Highest-impact 12 fixed in this release.
 A focused 3-round audit on `usage_summary` and `call_eligibility_check`
 surfaced 1 CRITICAL + 1 HIGH + 4 MEDIUM bugs. All fixed.
 
-#### CRITICAL — confirmed in production data
+#### CRITICAL, confirmed in production data
 - **`usage_summary` was silently truncating call counts at 250 per
   company.** Used a single `client.get(... per_page=250)` instead of
   paginating. Live evidence: Malick + Stewart both showed exactly 250
   calls in v0.4.0 output (the page-1 ceiling). The agency total
   underestimate was ~$44 ($132 vs the real ~$176 from the billing
   dashboard). Now uses `client.paginate()` for both calls AND trackers
-  loops — no truncation regardless of cycle volume.
+  loops, no truncation regardless of cycle volume.
 
 #### HIGH
 - **Cost attribution missed the base subscription when no minutes were
@@ -1109,29 +1234,29 @@ surfaced 1 CRITICAL + 1 HIGH + 4 MEDIUM bugs. All fixed.
 - The audit suggested removing `bool(gclid)` from the `is_google` source
   heuristic, claiming it tautologically tracks `has_gclid`. Rejected:
   gclid stands for "Google Click ID" and is only minted by Google Ads
-  — its presence is honest signal that the call originated from Google,
+ , its presence is honest signal that the call originated from Google,
   even when CallRail's `source_name` is generic ("Website Pool" for
   DNI sessions). Kept as-is with extended comment explaining why.
 
-### Added — tests
+### Added: tests
 
 - 5 new tests (154 → 159 total):
-  - `test_usage_summary_paginates_calls` — proves >250 calls now counted
-  - `test_usage_summary_partial_failure_per_company` — proves one bad
+  - `test_usage_summary_paginates_calls`: proves >250 calls now counted
+  - `test_usage_summary_partial_failure_per_company`: proves one bad
     company doesn't poison the report
   - `test_usage_summary_rejects_zero_days_without_dates`
-  - `test_call_eligibility_check_safe_duration_coercion` — float-string
+  - `test_call_eligibility_check_safe_duration_coercion`: float-string
     + string-boolean inputs handled
   - `test_call_eligibility_check_requires_CAL_prefix`
 
 ## [0.4.0] - 2026-04-24
 
-### Added — agency aggregation tools
+### Added (agency): aggregation tools
 
 Two new tools that are pure reads (zero write cost, zero provisioning) but
 add real agency-level utility.
 
-- **`usage_summary(days=30)`** — per-company cost attribution for the
+- **`usage_summary(days=30)`**: per-company cost attribution for the
   current CallRail cycle. Aggregates active trackers + per-company
   call-minute totals + projects estimated cost share under Call Tracking
   Starter pricing ($50 base + 5 numbers + 250 mins bundled; $3/local,
@@ -1141,7 +1266,7 @@ add real agency-level utility.
   signals. Pricing constants are editable in `server.py` for other plans.
 
 - **`call_eligibility_check(call_id, google_ads_min_duration_seconds=60)`**
-  — audits whether a specific call is/was eligible to count as a
+ , audits whether a specific call is/was eligible to count as a
   Google Ads conversion. Checks: `gclid` presence, answered status,
   duration vs. Google's threshold, source (Google vs Bing/GMB/organic).
   Returns verdict + per-check pass/fail + targeted remediation text
@@ -1149,7 +1274,7 @@ add real agency-level utility.
   conversion-debug sessions like "this 58-second answered call with a
   gclid doesn't show in Google Ads, why?".
 
-### Added — tests
+### Added: tests
 
 - 11 new unit tests (143 → 154 total):
   - 1 for `_is_toll_free` helper (number-type detection)
@@ -1169,7 +1294,7 @@ add real agency-level utility.
 
 ## [0.3.3] - 2026-04-24
 
-### Fixed (live-verification findings — round 2 of v0.3.2)
+### Fixed (live-verification findings, round 2 of v0.3.2)
 
 Post-0.3.2 live testing against real CallRail trackers across all 5 active
 agency client companies surfaced 3 additional issues. All fixed.
@@ -1183,7 +1308,7 @@ agency client companies surfaced 3 additional issues. All fixed.
 - **Tracker IDs containing `/` slipped past validation.** e.g.
   `tracker_id="TRK_xyz/companies/COM_admin"` was split into multiple
   URL segments by `_safe_path`, each segment encoded, and forwarded to
-  CallRail (which 404'd, so not exploitable — but wasted an API call).
+  CallRail (which 404'd, so not exploitable, but wasted an API call).
   New `_validate_id_shape` rejects any ID containing a slash.
 - **Dots-only tracker IDs slipped past `_safe_path`.** e.g.
   `tracker_id=".."` got concatenated with the `.json` extension to
@@ -1193,7 +1318,7 @@ agency client companies surfaced 3 additional issues. All fixed.
 
 ### Added
 
-- `_validate_id_shape(value, field_name, prefix=None)` helper — wired
+- `_validate_id_shape(value, field_name, prefix=None)` helper, wired
   into `get_tracker`, `update_tracker`, `delete_tracker`. Supports an
   optional prefix check for future tightening.
 - 10 new tests covering the new validation (8 parametrized on
@@ -1203,15 +1328,15 @@ Tests: 133 → 143. All green.
 
 ## [0.3.2] - 2026-04-24
 
-### Fixed (tracker CRUD audit pass — bug-hunt round 5)
+### Fixed (tracker CRUD audit pass, bug-hunt round 5)
 
 A targeted audit of the v0.3.0 tracker CRUD code surfaced 1 critical, 4 high,
-and 7 medium bugs. All fixed in this release. **No breaking changes** — every
+and 7 medium bugs. All fixed in this release. **No breaking changes**, every
 fix tightens validation or improves return-value fidelity.
 
 #### CRITICAL
 - **`update_tracker(greeting_text="x")` alone would break the tracker.** PUT
-  /trackers replaces the whole `call_flow` object — supplying greeting_text
+  /trackers replaces the whole `call_flow` object, supplying greeting_text
   without destination_number would silently zero out the destination number.
   Now rejected with a clear error directing the caller to pass both fields
   together (or call `get_tracker` first to read the current destination).
@@ -1233,7 +1358,7 @@ fix tightens validation or improves return-value fidelity.
   Now rejected with `"Cannot specify both… choose one."`.
 - **No format check on `area_code` / `pool_size` / `destination_number`.**
   - `area_code` must match `^\d{3}$`.
-  - `pool_size` must be in `[1, 50]` — the upper cap is a safety guard
+  - `pool_size` must be in `[1, 50]`: the upper cap is a safety guard
     against accidental 5-figure provisioning bills.
   - `destination_number` must look like an E.164-ish phone (`^\+?\d{10,15}$`).
 - **No length caps on `name` / `whisper_message` / `greeting_text`.**
@@ -1243,7 +1368,7 @@ fix tightens validation or improves return-value fidelity.
 - **`list_trackers(status="garbage")` was forwarded to the API.** Now
   validated against `("active", "disabled", None)` before any network call.
 - **Dead `if sms_enabled is not None` branch removed.** The parameter type
-  was `bool = True`, never None — branch always evaluated True. Now
+  was `bool = True`, never None, branch always evaluated True. Now
   unconditionally sets `sms_enabled` in the request body.
 
 #### Validation order normalization
@@ -1251,7 +1376,7 @@ fix tightens validation or improves return-value fidelity.
   `create_tracker`, so users see real input errors first instead of
   having to fix billing-confirm before learning about other problems.
 
-### Added — testing infrastructure
+### Added (testing): infrastructure
 
 - **67 new mock-based unit tests** for tracker CRUD covering every
   validation gate, every flag conflict, every format check, every
@@ -1263,7 +1388,7 @@ fix tightens validation or improves return-value fidelity.
 
 ### Notes
 
-This release contains no live API behavior changes — every existing
+This release contains no live API behavior changes, every existing
 caller continues to work. Validation tightens may now reject some
 inputs that previously made it to CallRail (and got 400-ed by them
 instead). Net result: faster + clearer failures for bad inputs.
@@ -1274,7 +1399,7 @@ instead). Net result: faster + clearer failures for bad inputs.
 
 - `list_companies` and `list_trackers` accept a new optional `status`
   parameter (server-side filter via CallRail's `?status=` query). Pass
-  `status="active"` to exclude soft-deleted/disabled records — useful
+  `status="active"` to exclude soft-deleted/disabled records, useful
   for cleaning up dashboards after running `delete_tracker` or
   deleting a company, since CallRail's DELETE is a soft-delete that
   preserves history but leaves entries in the default list response.
@@ -1288,27 +1413,27 @@ a soft-delete: status flips to "disabled", `disabled_at` timestamp set,
 underlying phone number released back to CallRail's pool, billing for
 that number stops. The record is retained for audit. This was
 previously surfaced as confusion ("DELETE returned 200 but record still
-appears") — the new `status` filter makes the intended workflow clearer.
+appears"), the new `status` filter makes the intended workflow clearer.
 
 ## [0.3.0] - 2026-04-24
 
-### Added — tracker CRUD
+### Added (tracker): CRUD
 
 Provision, configure, and disable CallRail tracking phone numbers
 programmatically. Useful for new-client onboarding (replaces ~20 minutes
 of clicking through the CallRail UI per client) and for automated source
 attribution setup.
 
-- **`get_tracker(tracker_id)`** — full detail for one tracker.
-- **`create_tracker(name, company_id, destination_number, …)`** — provision
+- **`get_tracker(tracker_id)`**: full detail for one tracker.
+- **`create_tracker(name, company_id, destination_number, …)`**: provision
   a new tracking number. Supports both `type='source'` (single number tied
   to one traffic source) and `type='session'` (DNI pool that swaps numbers
   per visitor). Local (via `area_code`) or toll-free (`toll_free=True`).
   Configures whisper message, recording, greeting text, SMS in one call.
-- **`update_tracker(tracker_id, …)`** — change name, destination,
+- **`update_tracker(tracker_id, …)`**: change name, destination,
   whisper, greeting, SMS toggle. Notes that CallRail silently ignores
   status changes via PUT (use `delete_tracker` to disable).
-- **`delete_tracker(tracker_id)`** — soft-delete: tracker stops receiving
+- **`delete_tracker(tracker_id)`**: soft-delete: tracker stops receiving
   new calls, history retained, phone number released back to CallRail's
   pool.
 
@@ -1316,7 +1441,7 @@ attribution setup.
 
 - `VALID_TRACKER_TYPES = ('source', 'session')`
 - `VALID_SOURCE_TYPES = ('all', 'direct', 'offline', 'google_my_business',
-  'google_ad_extension')` — discovered by exhaustive testing; CallRail's
+  'google_ad_extension')`, discovered by exhaustive testing; CallRail's
   REST docs do not enumerate this. Anything else returns
   400 *"Unknown tracking source type"*.
 
@@ -1346,7 +1471,7 @@ call-extension number on Google Ads.
 ### Added
 
 - `update_call` docstring now warns about CallRail's "spam-flagged calls
-  vanish from default GET endpoints" behavior — tag the call BEFORE marking
+  vanish from default GET endpoints" behavior, tag the call BEFORE marking
   it spam if you need to do both.
 
 ### Notes
@@ -1403,7 +1528,7 @@ field that direct testing proved CallRail itself does not support.
 - `MAX_RETRY_DELAY_SECONDS = 60.0` and `RETRYABLE_NETWORK_ERRORS` exported
   for transparency.
 - Default `timeout` is now `(connect=5.0, read=20.0)` instead of a single
-  value — a slow connect on a flaky network won't burn the full read budget.
+  value, a slow connect on a flaky network won't burn the full read budget.
 
 ## [0.2.2] - 2026-04-24
 
@@ -1416,7 +1541,7 @@ field that direct testing proved CallRail itself does not support.
   `requests` raised a cryptic *"Invalid leading whitespace in header value"*.
 - **Module import no longer requires an API key.** The singleton `CallRailClient`
   is now lazy-built on first use via `get_client()`. `import callrail_mcp.server`
-  works in clean environments — useful for test discovery, schema introspection,
+  works in clean environments, useful for test discovery, schema introspection,
   and `--help` flows.
 - **`per_page` clamping** (`list_calls`, `list_form_submissions`, `list_text_messages`):
   values `≤ 0` now clamp to `1` instead of being passed through to the API.
@@ -1435,7 +1560,7 @@ field that direct testing proved CallRail itself does not support.
 
 ### Changed
 - `server.client` is now a transparent proxy over `get_client()` for
-  backward compatibility — existing call sites work unchanged.
+  backward compatibility, existing call sites work unchanged.
 - Bumped User-Agent to `callrail-mcp/0.2.2`.
 
 ### Added
@@ -1458,19 +1583,19 @@ field that direct testing proved CallRail itself does not support.
 ## [0.2.0] - 2026-04-24
 
 ### Added
-- `CallRailClient` now supports `post()`, `put()`, and `delete()` (parallel to existing `get()` — same retry/backoff behavior, JSON body in/out, 204 handled).
+- `CallRailClient` now supports `post()`, `put()`, and `delete()` (parallel to existing `get()`: same retry/backoff behavior, JSON body in/out, 204 handled).
 - New write tools:
-  - `update_call` — update note, tags, value, spam flag, customer name, lead status.
-  - `add_call_tags` / `remove_call_tags` — additive/subtractive tag changes (preserves existing tags).
-  - `update_form_submission` — same field surface as `update_call` for CallRail form-tracking entries.
-  - `list_tags`, `create_tag`, `update_tag`, `delete_tag` — full CRUD on the per-company tag taxonomy.
+  - `update_call`: update note, tags, value, spam flag, customer name, lead status.
+  - `add_call_tags` / `remove_call_tags`: additive/subtractive tag changes (preserves existing tags).
+  - `update_form_submission`: same field surface as `update_call` for CallRail form-tracking entries.
+  - `list_tags`, `create_tag`, `update_tag`, `delete_tag`: full CRUD on the per-company tag taxonomy.
 - 5 new unit tests covering POST/PUT/DELETE happy paths, error envelopes, and 429 retry on POST.
 
 ## [0.1.0] - 2026-04-23
 
 ### Added
 - Initial public release.
-- `CallRailClient` — thin HTTP client with retry on 429/5xx, timeouts, transparent pagination helper.
+- `CallRailClient`: thin HTTP client with retry on 429/5xx, timeouts, transparent pagination helper.
 - MCP server exposing the following tools: `list_accounts`, `list_companies`,
   `list_trackers`, `list_calls`, `get_call`, `call_summary`, `list_form_submissions`,
   `list_text_messages`, `list_users`, `get_call_recording`, `get_call_transcript`,

@@ -57,3 +57,9 @@ dmypy.json
 *.api-key
 callrail-api-key.txt
 mcp-publisher
+
+# Agent tool pointers (local only; canonical notes live in DEVELOPMENT.md)
+CLAUDE.md
+AGENTS.md
+.claude/
+.hypothesis/

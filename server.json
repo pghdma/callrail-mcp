@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pghdma/callrail-mcp",
   "title": "CallRail MCP",
-  "description": "CallRail REST API v3 \u2014 59 tools: full CRUD, leads, server-side analytics, agency reporting.",
+  "description": "CallRail REST API v3: 57 tools for calls, leads, trackers, tags, users, and agency reporting.",
   "repository": {
     "url": "https://github.com/pghdma/callrail-mcp",
     "source": "github"
   },
-  "version": "1.1.3",
+  "version": "1.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "callrail-mcp",
-      "version": "1.1.3",
+      "version": "1.2.0",
       "transport": {
         "type": "stdio"
       },

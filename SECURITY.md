@@ -41,4 +41,4 @@ If your key is ever exposed, **revoke it immediately** at <https://app.callrail.
 
 ## Dependency updates
 
-This project has two runtime dependencies: `mcp` and `requests`. CI covers Python 3.10–3.13 on every push. Dependabot is configured to propose version bumps.
+This project has two runtime dependencies: `mcp` and `requests`. CI covers Python 3.10-3.13 on every push. Dependabot is configured to propose version bumps.

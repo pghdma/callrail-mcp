@@ -20,7 +20,7 @@ What you thought would happen.
 
 ## Actual behavior
 
-What actually happened. Include error output if any — **redact your API key**.
+What actually happened. Include error output if any, **redact your API key**.
 
 ## Environment
 
@@ -31,4 +31,4 @@ What actually happened. Include error output if any — **redact your API key**.
 
 ## Additional context
 
-Anything else relevant — related issues, docs you followed, etc.
+Anything else relevant, related issues, docs you followed, etc.

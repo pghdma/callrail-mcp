@@ -229,8 +229,9 @@ def test_validate_area_code(ac: str, ok: bool) -> None:
 
 
 @pytest.mark.parametrize("size,ok", [
-    (1, True), (4, True), (10, True), (50, True),
-    (0, False), (-1, False), (51, False), (10000, False),
+    # CallRail enforces 4-50 for session pools (docs + live 400 otherwise).
+    (4, True), (10, True), (50, True),
+    (0, False), (-1, False), (1, False), (3, False), (51, False), (10000, False),
 ])
 def test_validate_pool_size(size: int, ok: bool) -> None:
     got_ok, _ = _validate_pool_size(size)
@@ -589,11 +590,15 @@ def test_create_tracker_session_pool_happy_path(server_with_mock_client) -> None
         )
     )
     body = json.loads(responses.calls[1].request.body)
+    # Session schema per CallRail "Creating a Session Tracker": top-level
+    # pool_size, constraints under pool_numbers, required source. The old
+    # shape (pool_size nested in tracking_number) returned a 400.
     assert body["type"] == "session"
-    assert body["tracking_number"]["area_code"] == "412"
-    assert body["tracking_number"]["pool_size"] == 8
-    # Session trackers don't get a `source` block.
-    assert "source" not in body
+    assert body["pool_size"] == 8
+    assert body["pool_numbers"]["area_code"] == "412"
+    assert body["pool_numbers"]["local"] == "+14129548337"
+    assert "tracking_number" not in body
+    assert body["source"] == "all"
 
 
 @responses.activate
@@ -2265,7 +2270,7 @@ def test_v050_bulk_update_surfaces_truncation(server_with_mock_client) -> None:
         status=200,
     )
     out = json.loads(server_mod.bulk_update_calls(
-        source="bing_paid", days=7, set_note="x", dry_run=True,
+        company_id="COM1", days=7, set_note="x", dry_run=True,
     ))
     assert out["matched"] == 500
     assert out["truncated_at_cap"] is True
@@ -2724,9 +2729,10 @@ def test_v060_create_user_happy(server_with_mock_client) -> None:
     ))
     assert out["id"] == "USR_NEW"
     body = json.loads(responses.calls[1].request.body)
+    # CallRail's documented field is `companies`, not `company_ids`.
     assert body == {
         "email": "ok@x.com", "first_name": "A", "last_name": "B",
-        "role": "reporting", "company_ids": ["COM_X"],
+        "role": "reporting", "companies": ["COM_X"],
     }
 
 
@@ -2907,7 +2913,9 @@ def test_v070_create_outbound_call_requires_confirmation(
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = None
     out = json.loads(server_mod.create_outbound_call(
-        from_number="+14129548337", to_number="+14125551234",
+        caller_id="+14129548337",
+        business_phone_number="+14125559999",
+        customer_phone_number="+14125551234",
     ))
     assert out["error"] is True
     assert "confirm_dialing" in out["message"]
@@ -2919,7 +2927,9 @@ def test_v070_create_outbound_call_rejects_bad_phone(
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = None
     out = json.loads(server_mod.create_outbound_call(
-        from_number="not-a-phone", to_number="+14125551234",
+        caller_id="not-a-phone",
+        business_phone_number="+14125559999",
+        customer_phone_number="+14125551234",
         confirm_dialing=True,
     ))
     assert out["error"] is True
@@ -3079,40 +3089,8 @@ def test_v060_get_text_message_rejects_empty(monkeypatch: pytest.MonkeyPatch) ->
     assert out["error"] is True
 
 
-@responses.activate
-def test_v060_list_webhooks(server_with_mock_client) -> None:
-    responses.add(
-        responses.GET,
-        "https://api.callrail.com/v3/a.json",
-        json={"accounts": [{"id": "ACC1"}]},
-        status=200,
-    )
-    responses.add(
-        responses.GET,
-        "https://api.callrail.com/v3/a/ACC1/webhooks.json",
-        json={"webhooks": []},
-        status=200,
-    )
-    out = json.loads(server_mod.list_webhooks())
-    assert "webhooks" in out
 
 
-@responses.activate
-def test_v060_get_webhook(server_with_mock_client) -> None:
-    responses.add(
-        responses.GET,
-        "https://api.callrail.com/v3/a.json",
-        json={"accounts": [{"id": "ACC1"}]},
-        status=200,
-    )
-    responses.add(
-        responses.GET,
-        "https://api.callrail.com/v3/a/ACC1/webhooks/WH_1.json",
-        json={"id": "WH_1", "url": "https://example.com/hook"},
-        status=200,
-    )
-    out = json.loads(server_mod.get_webhook(webhook_id="WH_1"))
-    assert out["id"] == "WH_1"
 
 
 # ---- Validate_email helper ----
@@ -3889,3 +3867,285 @@ def test_v113_days_cap_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["error"] is True and "36500" in out["message"]
     out = json.loads(server_mod.list_calls(days=36500))
     assert "error" not in out
+
+
+# ============================================================
+# v1.2.0 — CallRail API contract corrections (2026-09 audit)
+# ============================================================
+
+
+def test_v120_answer_status_replaces_bogus_answered_param(
+    server_with_mock_client,
+) -> None:
+    """CallRail has no `answered` query param; live-verified 2026-09-07 that
+    passing it returns EVERY call. The real filter is `answer_status`."""
+
+    @responses.activate
+    def run(**kw):
+        responses.add(
+            responses.GET, "https://api.callrail.com/v3/a.json",
+            json={"accounts": [{"id": "ACC1"}]}, status=200)
+        responses.add(
+            responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [], "total_pages": 1}, status=200)
+        out = json.loads(server_mod.list_calls(**kw))
+        return out, responses.calls[-1].request.url
+
+    # Deprecated alias must translate, never be forwarded verbatim.
+    _, url = run(answered="true")
+    assert "answer_status=answered" in url and "answered=" not in url.replace("answer_status=", "")
+    _, url = run(answered="false")
+    assert "answer_status=missed" in url
+    _, url = run(answer_status="voicemail")
+    assert "answer_status=voicemail" in url
+    # Invalid values rejected instead of silently ignored by the API.
+    out = json.loads(server_mod.list_calls(answer_status="bogus"))
+    assert out["error"] is True and "answer_status" in out["message"]
+    out = json.loads(server_mod.list_calls(answered="yes"))
+    assert out["error"] is True
+    out = json.loads(server_mod.list_calls(answered="true", answer_status="missed"))
+    assert out["error"] is True and "not both" in out["message"]
+
+
+@responses.activate
+def test_v120_list_calls_source_filtered_client_side(
+    server_with_mock_client,
+) -> None:
+    """`source` is not a server-side filter. It must not reach the wire, and
+    the page must actually be filtered rather than returned unfiltered."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [
+            {"id": "CAL1", "source": "Google Ads"},
+            {"id": "CAL2", "source": "Bing Ads"},
+            {"id": "CAL3", "source": "google ads"},
+        ], "total_records": 3, "total_pages": 1}, status=200)
+    out = json.loads(server_mod.list_calls(source="Google Ads"))
+    assert "source=" not in responses.calls[-1].request.url
+    assert [c["id"] for c in out["calls"]] == ["CAL1", "CAL3"]  # case-insensitive
+    assert out["source_filter"]["applied"] == "client_side_current_page"
+    assert out["source_filter"]["matched_on_page"] == 2
+
+
+@responses.activate
+def test_v120_bulk_update_source_filter_is_honored(
+    server_with_mock_client,
+) -> None:
+    """THE destructive bug: source= was forwarded and ignored, so a commit
+    run updated every call in the window. It must now match client-side."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [
+            {"id": "CAL1", "source": "Bing Ads"},
+            {"id": "CAL2", "source": "Google Ads"},
+            {"id": "CAL3", "source": "Bing Ads"},
+        ], "total_pages": 1}, status=200)
+    out = json.loads(server_mod.bulk_update_calls(
+        source="Bing Ads", days=7, set_note="x", dry_run=True))
+    assert out["matched"] == 2
+    assert {c["id"] for c in out["would_update_calls"]} == {"CAL1", "CAL3"}
+    assert "source=" not in responses.calls[-1].request.url
+
+
+def test_v120_bulk_update_rejects_spam_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CallRail cannot un-mark spam via API; advertising it was a lie."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.bulk_update_calls(
+        company_id="COM1", set_spam=False, dry_run=False))
+    assert out["error"] is True and "un-mark" in out["message"]
+
+
+def test_v120_webhook_tools_removed() -> None:
+    """/webhooks.json does not exist in CallRail v3 (live: 404). The two
+    tools that called it could only ever return an error envelope."""
+    names = {t.name for t in server_mod.mcp._tool_manager.list_tools()}
+    assert "list_webhooks" not in names
+    assert "get_webhook" not in names
+    assert "list_integrations" in names  # the documented replacement
+
+
+def test_v120_call_stats_accepts_full_group_by_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """company_id and last_requested_page are valid per the API's own 400
+    message but were rejected client-side."""
+    from callrail_mcp.server import VALID_CALL_STATS_GROUP_BY
+
+    assert set(VALID_CALL_STATS_GROUP_BY) == {
+        "company", "company_id", "source", "keywords",
+        "campaign", "referrer", "landing_page", "last_requested_page",
+    }
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.call_stats(group_by="tags"))
+    assert out["error"] is True and "group_by" in out["message"]
+
+
+def test_v120_timeseries_point_cap_and_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CallRail 400s past 200 data points; we must catch it pre-network and
+    accept `interval` as the documented remedy."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = CallRailClient(max_retries=0)
+    out = json.loads(server_mod.call_timeseries(days=365))
+    assert out["error"] is True and "200" in out["message"]
+    out = json.loads(server_mod.call_timeseries(days=365, interval="bogus"))
+    assert out["error"] is True and "interval" in out["message"]
+
+
+@responses.activate
+def test_v120_timeseries_interval_reaches_wire(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/timeseries.json",
+        json={"total_results": {"total_calls": 1}, "data": []}, status=200)
+    out = json.loads(server_mod.call_timeseries(days=365, interval="month"))
+    assert "error" not in out
+    assert "interval=month" in responses.calls[-1].request.url
+
+
+@responses.activate
+def test_v120_eligibility_matches_display_name_sources(
+    server_with_mock_client,
+) -> None:
+    """`source` is a display name ("Google Ads"), not a slug. Pre-fix, a
+    Google Ads call without a gclid was reported as not-Google."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CALG.json",
+        json={"source": "Google Ads", "duration": 120, "answered": True,
+              "gclid": None}, status=200)
+    out = json.loads(server_mod.call_eligibility_check(call_id="CALG"))
+    assert out["checks"]["is_google_source"] is True
+
+
+@responses.activate
+def test_v120_eligibility_still_excludes_bing(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CALB.json",
+        json={"source": "Bing Ads", "duration": 120, "answered": True,
+              "gclid": None}, status=200)
+    out = json.loads(server_mod.call_eligibility_check(call_id="CALB"))
+    assert out["checks"]["is_google_source"] is False
+
+
+@responses.activate
+def test_v120_outbound_call_uses_documented_body(server_with_mock_client) -> None:
+    """Pre-fix the body was {"from","to"} — fields CallRail does not accept."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"id": "CAL_NEW"}, status=201)
+    json.loads(server_mod.create_outbound_call(
+        caller_id="+14129548337",
+        business_phone_number="+14125559999",
+        customer_phone_number="+14125551234",
+        confirm_dialing=True,
+    ))
+    body = json.loads(responses.calls[-1].request.body)
+    assert body == {
+        "caller_id": "+14129548337",
+        "business_phone_number": "+14125559999",
+        "customer_phone_number": "+14125551234",
+    }
+
+
+@responses.activate
+def test_v120_update_company_sends_external_form_capture(
+    server_with_mock_client,
+) -> None:
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/companies/COM1.json",
+        json={"id": "COM1"}, status=200)
+    json.loads(server_mod.update_company(company_id="COM1", form_capture=True))
+    body = json.loads(responses.calls[-1].request.body)
+    assert body == {"external_form_capture": True}
+    assert "form_capture" not in set(body) - {"external_form_capture"}
+
+
+@responses.activate
+def test_v120_call_summary_surfaces_scan_truncation(
+    server_with_mock_client,
+) -> None:
+    """usage_summary/call_summary previously claimed '(no truncation)' while
+    silently capping at 50 pages x 250 = 12,500 calls."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    # total_pages far above the 50-page cap => truncation.
+    for _ in range(51):
+        responses.add(
+            responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+            json={"calls": [{"duration": 60, "answered": True}],
+                  "total_pages": 999, "total_records": 249750}, status=200)
+    out = json.loads(server_mod.call_summary(days=7))
+    assert out["scan_truncated"] is True
+    assert "UNDERSTATE" in out["scan_note"]
+
+
+def test_v120_paginate_stats_reports_truncation(server_with_mock_client) -> None:
+    @responses.activate
+    def run():
+        for _ in range(4):
+            responses.add(
+                responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+                json={"calls": [{"id": "C"}], "total_pages": 99,
+                      "total_records": 500}, status=200)
+        stats = {}
+        items = list(server_mod.get_client().paginate(
+            "a/ACC1/calls.json", {}, items_key="calls", max_pages=3, stats=stats))
+        return items, stats
+
+    items, stats = run()
+    assert len(items) == 3
+    assert stats["truncated"] is True
+    assert stats["pages_fetched"] == 3
+    assert stats["items_yielded"] == 3
+    assert stats["total_records"] == 500
+
+
+@responses.activate
+def test_v120_compare_periods_excludes_failed_company_from_totals(
+    server_with_mock_client,
+) -> None:
+    """A company whose pagination failed mid-window must not contribute its
+    partial minutes to totals (usage_summary already excludes it)."""
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [{"id": "COM1", "name": "Co", "status": "active",
+                             "time_zone": "UTC"}], "total_pages": 1}, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"error": "boom"}, status=503)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"error": "boom"}, status=503)
+    out = json.loads(server_mod.compare_periods(days=7))
+    assert out["partial_failures"]
+    assert out["current"]["total_minutes"] == 0
+    assert out["by_company"] == []

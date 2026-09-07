@@ -1,13 +1,13 @@
-# callrail-mcp — Claude Code session notes
+# callrail-mcp developer notes
 
 Project: Model Context Protocol server for CallRail REST API v3.
 Author: Steve Japalucci / PGHDMA.
-Repo: https://github.com/pghdma/callrail-mcp — MIT, public.
+Repo: https://github.com/pghdma/callrail-mcp. MIT, public.
 
 ## Where things live
 
 - **Source:** `src/callrail_mcp/` (`client.py`, `server.py`, `__init__.py`, `__main__.py`)
-- **Tests:** `tests/` — 60 passing, uses `responses` + `hypothesis`. No real API hits in CI.
+- **Tests:** `tests/`: 408 passing, uses `responses` + `hypothesis`. No real API hits in CI.
 - **Local dev venv:** `.venv/` (created via `python -m venv .venv && pip install -e ".[dev]"`).
 - **pipx install:** `/Users/s/.local/bin/callrail-mcp` → points to `~/.local/pipx/venvs/callrail-mcp/`.
 - **API key:** `~/.config/callrail/api-key.txt` (mode 600). Also honored: `CALLRAIL_API_KEY` env, `CALLRAIL_API_KEY_FILE` env.
@@ -17,46 +17,46 @@ Repo: https://github.com/pghdma/callrail-mcp — MIT, public.
 ```bash
 # 1. bump version in 3 places
 sed -i '' 's/0.X.Y/0.X.Z/g' src/callrail_mcp/__init__.py pyproject.toml src/callrail_mcp/client.py
-# 2. edit CHANGELOG.md — move items from [Unreleased] to new [0.X.Z] - YYYY-MM-DD
+# 2. edit CHANGELOG.md: move items from [Unreleased] to a new [0.X.Z] - YYYY-MM-DD section
 # 3. run checks
 .venv/bin/ruff check src tests && CALLRAIL_API_KEY=dummy .venv/bin/pytest -q
 # 4. commit, push
 git add -A && git commit -m "..." && git push
-# 5. reinstall locally so new tools are picked up in Claude Code next restart
+# 5. reinstall locally so new tools are picked up on next MCP client restart
 pipx install . --force
 # 6. (optional) publish to PyPI: git tag v0.X.Z && git push --tags && create GitHub Release
-#    — publish.yml handles the build+upload via trusted publishing (one-time setup at pypi.org)
+#    publish.yml handles the build+upload via trusted publishing (one-time setup at pypi.org)
 ```
 
-Claude Code restart required after `pipx install --force` for new tools to show up in the MCP session.
+Restart your MCP client after `pipx install --force` for new tools to appear in the session.
 
 ## Patterns to keep
 
-- **Every tool returns a JSON string via `_ok()` or `_err()`.** Never raise from a tool body — catch `CallRailError` and format.
-- **Pre-validate tool inputs before calling `client.resolve_account_id()`** — avoids burning an API call to fetch the account for a request that would fail validation anyway.
+- **Every tool returns a JSON string via `_ok()` or `_err()`.** Never raise from a tool body, catch `CallRailError` and format.
+- **Pre-validate tool inputs before calling `client.resolve_account_id()`**: avoids burning an API call to fetch the account for a request that would fail validation anyway.
 - **`_safe_path()` encodes EVERY path segment** used in the URL. Rejects dot-segments and control chars. Any new tool that interpolates a user-controllable id (call_id, tracker_id, tag_id, etc.) into a path must go through `client.get/post/put/delete` (which use `_safe_path` internally).
-- **Enum tuples:** `VALID_TAG_COLORS` (client.py, 24 documented values as of 2026-07; cyan1 live-verified), `VALID_TRACKER_TYPES`, `VALID_SOURCE_TYPES` (server.py, 12 = 10 documented + facebook_all/bing_all which docs still omit). CallRail now documents these at apidocs.callrail.com — check docs first, probe live second.
-- **No `logging.basicConfig()` at import time.** Library hygiene — only `main()` (CLI entry) configures logging.
+- **Enum tuples:** `VALID_TAG_COLORS` (client.py, 24 documented values as of 2026-07; cyan1 live-verified), `VALID_TRACKER_TYPES`, `VALID_SOURCE_TYPES` (server.py, 12 = 10 documented + facebook_all/bing_all which docs still omit). CallRail now documents these at apidocs.callrail.com, check docs first, probe live second.
+- **No `logging.basicConfig()` at import time.** Library hygiene, only `main()` (CLI entry) configures logging.
 - **Lazy client init.** `server.get_client()` is the accessor; `server.client` is a proxy for back-compat. Module import must not require a key.
 
-## API coverage limits — endpoints we deliberately did NOT ship
+## API coverage limits, endpoints we deliberately did NOT ship
 
 Probed live 2026-04-24, re-probed 2026-07-03. These endpoints are
 documented but return **403 "You do not have permission"** on this
 account. Re-attempt if account/plan is upgraded:
 
 - **`POST /a/{aid}/text-messages.json`** (send SMS; MMS supported
-  since 2026-05-05 via media_url/media_file) — needs A2P/TCR SMS
+  since 2026-05-05 via media_url/media_file), needs A2P/TCR SMS
   registration. CallRail enforces TCPA-compliance keywords
   (STOP/CANCEL/UNSUBSCRIBE) on outbound.
-- **`POST /a/{aid}/integrations.json`** (create webhook integration) —
+- **`POST /a/{aid}/integrations.json`** (create webhook integration),
   needs Integration-Admin permission.
-- **Outbound Caller IDs** (`/caller_ids.json` CRUD) — now DOCUMENTED
+- **Outbound Caller IDs** (`/caller_ids.json` CRUD), now DOCUMENTED
   (was UI-only in April) but still 403 on this account. Support ticket
   may unlock.
-- **Message Flows** (`/message-flows.json` CRUD — SMS auto-reply
-  flows) — documented, 403.
-- **Integration Filters** (`/integration_triggers.json` CRUD) —
+- **Message Flows** (`/message-flows.json` CRUD. SMS auto-reply
+  flows), documented, 403.
+- **Integration Filters** (`/integration_triggers.json` CRUD),
   documented, 403.
 
 Shipped in v1.1.0 (were new since April): leads + timelines,
@@ -70,11 +70,11 @@ return 404/null without Premium Conversation Intelligence.
 get_call_transcript surfaces a hint on 404.
 
 CallRail also now ships an official hosted OAuth MCP server (~30
-tools, URL via account team) — see README comparison section.
+tools, URL via account team), see README comparison section.
 
 Endpoints we built but the user should know are permission-sensitive:
 - `create_outbound_call` works on standard accounts but **places a
-  real phone call** — requires `confirm_dialing=True` safety guard.
+  real phone call**, requires `confirm_dialing=True` safety guard.
 - `create_notification` works; `alert_type` enum is plan-specific
   (we warn-not-reject unknown values).
 
@@ -92,11 +92,11 @@ plans):
 - Marking a call spam **hides it from default GETs**. Tag first, spam-flag last.
 - `value` field on PUT /calls returns **HTTP 500** from CallRail. Do not expose on `update_call`. Works on form submissions.
 - `Retry-After` can be seconds-int OR HTTP-date. `_parse_retry_after` handles both + caps at 60s.
-- CallRail can return JSON arrays where docs suggest objects — `_parse` rejects non-object responses with CallRailError.
+- CallRail can return JSON arrays where docs suggest objects, `_parse` rejects non-object responses with CallRailError.
 - Tag colors: 24 documented values (see VALID_TAG_COLORS). Anything else = 400. (Was 10 empirical values pre-2026-07; docs now enumerate.)
 - Tracker source.type: 12 known-valid values (10 documented + facebook_all/bing_all). Anything else = 400. For multi-source DNI use `type='session'` pools.
 - Tag create/`add_call_tags` with unknown names **auto-creates tags at the company level** as a side effect.
-- `confirm_billing=True` is REQUIRED on `create_tracker` — defensive against AI exploration. Costs money (~$3/mo/number).
+- `confirm_billing=True` is REQUIRED on `create_tracker`, guarding against accidental automated provisioning. Costs money (~$3/mo/number).
 
 ## Validation guards added across versions (don't re-discover these)
 
@@ -110,37 +110,37 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.1.3
+## Current version: 1.2.0
 
 See `CHANGELOG.md` for full history. Highlights:
-- `0.1.0` — initial 12 read tools
-- `0.2.0-0.2.4` — write tools (update_call, tag CRUD, form updates); 4 passes of bug fixing
-- `0.3.0` — tracker CRUD + billing-confirmation safeguard
-- `0.3.1` — `status` filter on `list_companies` / `list_trackers`
-- `0.3.2` — tracker CRUD audit (12 bugs incl. CRITICAL: `update_tracker(greeting_text)` alone wiped destination)
-- `0.3.3` — facebook_all/bing_all source types added; tracker_id slash bypass
-- `0.4.0` — `usage_summary` + `call_eligibility_check` agency tools
-- `0.4.1` — usage_summary CRITICAL pagination bug (was truncating at 250 calls/company)
-- `0.4.2` — POST no-retry on 5xx, paginate total_pages handling, ID validation across older tools
-- `0.4.3` — meta-audit: largest-remainder cost rounding, _err truncation, etc.
-- `0.4.4` — Unicode-invisible char rejection, source-slug detection, extension stripping
-- `0.4.5` — paginate companies, defensive total_pages cap
-- `0.4.6` — partial-failure surfaces accumulated minutes (silent data loss fix), bool rejected as days, is_toll_free handles formatted numbers
-- `0.4.7` — string-`days` no longer crashes `_date_window`; docstrings updated for length caps + source-slug semantics
-- `0.4.8` — `days=10**18` no longer raises OverflowError from `timedelta` (capped at 36500/100yr)
-- `0.5.0` — 3 new agency workflow tools: `compare_periods`, `bulk_update_calls`, `spam_detector` + TZ-aware `_date_window`
-- `0.5.1` — Round 2 audit on v0.5.0: 11 bugs (Unicode tag filtering, partial_failures, TOCTOU race fix, broad exception catching, biggest_mover direction)
-- `0.5.2` — Round 3 audit on v0.5.1: 8 bugs (HIGH: `_tag_names_from` non-list type-check; spam_detector days-cap at 90, dedup TZ warnings, auto_tag uses full filtered list)
-- `0.5.3` — Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
-- `0.5.4` — Round 5 cleanup (0 correctness bugs, 2 LOW style fixes — v0.5.x bug-hunt converged)
-- `0.6.0` — **API parity push: 12 new tools** (Companies CRUD, Users CRUD, get_form_submission, get_text_message, list_webhooks, get_webhook). API surface coverage 50% → 75%
-- `0.6.1` — Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through)
-- `0.7.0` — Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
-- `1.0.0` — **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
+- `0.1.0`: initial 12 read tools
+- `0.2.0-0.2.4`: write tools (update_call, tag CRUD, form updates); 4 passes of bug fixing
+- `0.3.0`: tracker CRUD + billing-confirmation safeguard
+- `0.3.1`: `status` filter on `list_companies` / `list_trackers`
+- `0.3.2`: tracker CRUD audit (12 bugs incl. CRITICAL: `update_tracker(greeting_text)` alone wiped destination)
+- `0.3.3`: facebook_all/bing_all source types added; tracker_id slash bypass
+- `0.4.0`: `usage_summary` + `call_eligibility_check` agency tools
+- `0.4.1`: usage_summary CRITICAL pagination bug (was truncating at 250 calls/company)
+- `0.4.2`: POST no-retry on 5xx, paginate total_pages handling, ID validation across older tools
+- `0.4.3`: meta-audit: largest-remainder cost rounding, _err truncation, etc.
+- `0.4.4`: Unicode-invisible char rejection, source-slug detection, extension stripping
+- `0.4.5`: paginate companies, defensive total_pages cap
+- `0.4.6`: partial-failure surfaces accumulated minutes (silent data loss fix), bool rejected as days, is_toll_free handles formatted numbers
+- `0.4.7`: string-`days` no longer crashes `_date_window`; docstrings updated for length caps + source-slug semantics
+- `0.4.8`: `days=10**18` no longer raises OverflowError from `timedelta` (capped at 36500/100yr)
+- `0.5.0`: 3 new agency workflow tools: `compare_periods`, `bulk_update_calls`, `spam_detector` + TZ-aware `_date_window`
+- `0.5.1`: Round 2 audit on v0.5.0: 11 bugs (Unicode tag filtering, partial_failures, TOCTOU race fix, broad exception catching, biggest_mover direction)
+- `0.5.2`: Round 3 audit on v0.5.1: 8 bugs (HIGH: `_tag_names_from` non-list type-check; spam_detector days-cap at 90, dedup TZ warnings, auto_tag uses full filtered list)
+- `0.5.3`: Round 4 audit on v0.5.2: 4 bugs (string-days bypass on spam_detector cap, auto_tag operation cap of 1000, docstring drift, test isolation for warning dedup)
+- `0.5.4`: Round 5 cleanup (0 correctness bugs, 2 LOW style fixes, v0.5.x bug-hunt converged)
+- `0.6.0`: **API parity push: 12 new tools** (Companies CRUD, Users CRUD, get_form_submission, get_text_message, list_webhooks, get_webhook). API surface coverage 50% → 75%
+- `0.6.1`: Audit on v0.6.0: 9 bugs (2 HIGH: create_company always-sending bool toggles could DISABLE paid features; create_user(role='') slipped through)
+- `0.7.0`: Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
+- `1.0.0`: **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
 
-**Tests: 396 passing. 59 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
+**Tests: 408 passing. 57 tools total. mypy --strict + ruff + pytest -W error + bandit + pyright all clean.**
 
-## Future work (deferred — see "API coverage limits" above)
+## Future work (deferred, see "API coverage limits" above)
 
 Out of scope for v1.0.0; will work on if/when:
 1. SMS send (when account gets A2P SMS API permission)

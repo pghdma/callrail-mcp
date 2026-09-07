@@ -192,7 +192,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.1.3 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.2.0 (+https://github.com/pghdma/callrail-mcp)",
             }
         )
 
@@ -309,10 +309,13 @@ class CallRailClient:
                 continue
             return resp
 
-        # Should be unreachable; keeps type checker happy.
+        # Should be unreachable; keeps type checker happy. Raise rather than
+        # assert so behavior is identical under `python -O` (which strips
+        # asserts) and so bandit's B101 does not fire on a hot path.
         if resp is not None:
             return resp
-        assert last_exc is not None
+        if last_exc is None:  # pragma: no cover - defensive
+            raise CallRailError("Exhausted retries with no response or error.")
         raise CallRailError(f"Exhausted retries: {last_exc}") from last_exc
 
     def _parse(self, resp: Response, method: str, path: str) -> dict[str, Any]:
@@ -407,6 +410,7 @@ class CallRailClient:
         params: dict[str, Any] | None = None,
         items_key: str | None = None,
         max_pages: int = 50,
+        stats: dict[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield items across pages. Stops at `max_pages` to avoid runaways.
 
@@ -414,6 +418,12 @@ class CallRailClient:
             path: API path (e.g. `a/{id}/calls.json`).
             params: Query params. Auto-fills page and per_page.
             items_key: Which top-level array to yield from. If None, auto-detects.
+            stats: Optional dict updated in place with pagination facts, so
+                callers can surface silent truncation instead of reporting a
+                capped total as if it were complete. Keys set:
+                `pages_fetched`, `items_yielded`, `total_records` (server
+                figure when present), `truncated` (True when the max_pages
+                cap stopped us before the last page), `max_pages`.
             max_pages: Safety cap.
         """
         params = dict(params or {})
@@ -425,10 +435,20 @@ class CallRailClient:
         except (TypeError, ValueError):
             pp = DEFAULT_PER_PAGE
         params["per_page"] = max(1, min(pp, MAX_PER_PAGE))
+        if stats is not None:
+            stats.update({
+                "pages_fetched": 0, "items_yielded": 0,
+                "total_records": None, "truncated": False,
+                "max_pages": max_pages,
+            })
         page = 1
         while page <= max_pages:
             params["page"] = page
             data = self.get(path, params)
+            if stats is not None:
+                stats["pages_fetched"] = page
+                if isinstance(data.get("total_records"), int):
+                    stats["total_records"] = data["total_records"]
             key = items_key
             if key is None:
                 # Heuristic: find the first list-valued key
@@ -456,6 +476,8 @@ class CallRailClient:
             skipped = 0
             for item in items:
                 if isinstance(item, dict):
+                    if stats is not None:
+                        stats["items_yielded"] += 1
                     yield item
                 else:
                     skipped += 1
@@ -486,12 +508,18 @@ class CallRailClient:
             # `total_pages: 999999` shouldn't pin the iterator against the
             # caller's intended cap — just stop at max_pages.
             if total_pages and page >= min(total_pages, max_pages):
+                if stats is not None and total_pages > max_pages:
+                    # Exiting via break, so the while/else clause below never
+                    # runs; record the truncation here instead.
+                    stats["truncated"] = True
                 break
             page += 1
         else:
             # `while/else`: this clause only runs if the loop exits via the
             # condition becoming false (i.e. page > max_pages), NOT via
             # break. So this fires precisely when we hit the cap.
+            if stats is not None:
+                stats["truncated"] = True
             logger.warning(
                 "paginate(%s) hit max_pages cap of %d; remaining pages not fetched.",
                 path, max_pages,
