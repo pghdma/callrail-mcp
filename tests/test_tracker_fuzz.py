@@ -156,7 +156,11 @@ def test_list_trackers_never_raises(status: str | None, per_page: int, page: int
     assert _is_envelope(out)
 
 
-# ---- C1 specific: greeting_text alone is ALWAYS rejected ----
+# ---- Greeting invariants ----
+# v0.3.2 rejected greeting_text without destination_number because PUT
+# /trackers replaces the whole call_flow. v1.3.0 reads the current flow and
+# merges instead, so that case now needs the network. What stays a pure
+# pre-network rejection is asking for both greeting kinds at once.
 
 @settings(deadline=None, max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
@@ -165,9 +169,12 @@ def test_list_trackers_never_raises(status: str | None, per_page: int, page: int
     ),
     greeting_text=nasty_strs.filter(lambda s: s.strip()),
 )
-def test_C1_greeting_text_alone_always_rejected(tracker_id: str, greeting_text: str) -> None:
-    """greeting_text without destination_number must always produce error envelope."""
-    out = server_mod.update_tracker(tracker_id=tracker_id, greeting_text=greeting_text)
+def test_greeting_text_and_recording_url_together_always_rejected(tracker_id: str, greeting_text: str) -> None:
+    """Both greeting kinds at once must always produce the error envelope."""
+    out = server_mod.update_tracker(
+        tracker_id=tracker_id, greeting_text=greeting_text,
+        greeting_recording_url="https://example.com/greeting.mp3",
+    )
     parsed = json.loads(out)
     assert parsed.get("error") is True
-    assert "destination_number" in parsed["message"]
+    assert "not both" in parsed["message"]

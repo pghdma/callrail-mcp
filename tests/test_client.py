@@ -438,3 +438,58 @@ def test_paginate_clamps_huge_per_page(client: CallRailClient) -> None:
     list(client.paginate("a/ACC1/calls.json", params={"per_page": 99999}, items_key="calls"))
     sent_pp = int(responses.calls[0].request.params["per_page"])
     assert sent_pp <= 250
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 (2026-10 sweep): encoding errors, retried DELETE, Request-From
+# ---------------------------------------------------------------------------
+
+def _fresh(monkeypatch, retries: int = 0) -> CallRailClient:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    monkeypatch.delenv("CALLRAIL_ACCOUNT_ID", raising=False)
+    monkeypatch.setattr("callrail_mcp.client.time.sleep", lambda *_: None)
+    return CallRailClient(max_retries=retries)
+
+
+@responses.activate
+def test_v130_surrogate_in_path_is_callrail_error(monkeypatch) -> None:
+    """quote() raised UnicodeEncodeError, which no tool body catches."""
+    c = _fresh(monkeypatch)
+    with pytest.raises(CallRailError, match="cannot be URL-encoded"):
+        c.get("a/ACC\ud800/calls.json")
+
+
+@responses.activate
+def test_v130_surrogate_in_params_is_callrail_error(monkeypatch) -> None:
+    c = _fresh(monkeypatch)
+    with pytest.raises(CallRailError, match="could not be encoded"):
+        c.get("a.json", params={"search": "x\ud800"})
+
+
+@responses.activate
+def test_v130_delete_404_after_retry_is_already_gone(monkeypatch) -> None:
+    """Timeout on the first DELETE (which most likely succeeded), 404 on the
+    retry: report success, not a failure the operator would act on."""
+    import requests as _rq
+    c = _fresh(monkeypatch, retries=1)
+    url = "https://api.callrail.com/v3/a/ACC1/tags/123.json"
+    responses.add(responses.DELETE, url, body=_rq.exceptions.ReadTimeout("slow"))
+    responses.add(responses.DELETE, url, json={"error": "not found"}, status=404)
+    out = c.delete("a/ACC1/tags/123.json")
+    assert out == {"deleted": True, "already_gone": True, "attempts": 2}
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_v130_delete_404_on_first_attempt_is_still_an_error(monkeypatch) -> None:
+    c = _fresh(monkeypatch, retries=1)
+    responses.add(responses.DELETE, "https://api.callrail.com/v3/a/ACC1/tags/123.json",
+                  json={"error": "not found"}, status=404)
+    with pytest.raises(CallRailError) as ei:
+        c.delete("a/ACC1/tags/123.json")
+    assert ei.value.status == 404
+
+
+def test_v130_request_from_header(monkeypatch) -> None:
+    c = _fresh(monkeypatch)
+    assert c.session.headers["Request-From"] == "callrail-mcp"

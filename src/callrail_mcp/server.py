@@ -25,6 +25,8 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 from .client import MAX_PER_PAGE, VALID_TAG_COLORS, CallRailClient, CallRailError
 
 
@@ -91,6 +93,31 @@ client = _ClientProxy()
 mcp = _load_mcp_server_class()("callrail-mcp")
 
 
+def _annotations(
+    *, read_only: bool = False, destructive: bool = False,
+    idempotent: bool = False, open_world: bool = False,
+) -> ToolAnnotations:
+    """Tool annotations let MCP clients prompt before risky calls. Built from
+    the wire-format keys because mcp 1.x names the fields in camelCase and
+    2.x in snake_case; both validate the camelCase form."""
+    return ToolAnnotations.model_validate({
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "idempotentHint": idempotent,
+        "openWorldHint": open_world,
+    })
+
+
+# The CallRail account is a closed domain, so open_world is false everywhere
+# except the one tool that reaches the phone network.
+_READ = _annotations(read_only=True, idempotent=True)
+_CREATE = _annotations()
+_UPDATE = _annotations(idempotent=True)
+_DELETE = _annotations(destructive=True, idempotent=True)
+_BULK_WRITE = _annotations(destructive=True)
+_DIAL = _annotations(open_world=True)
+
+
 # ---- Shared helpers ----
 
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -138,7 +165,7 @@ def _date_window(
     if isinstance(days, str):
         try:
             days = int(days)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             days = None
     elif isinstance(days, float):
         days = int(days) if days.is_integer() else None
@@ -190,6 +217,20 @@ _LEGACY_TZS: frozenset[str] = frozenset({
     "GMT", "Z", "UTC-5", "UTC-8",
 })
 
+# `zoneinfo` only knows "EST" of these; "EDT", "PDT", etc. raise, which used
+# to drop silently to UTC while the output still claimed the legacy name.
+# Map to the zone CallRail's own time-zone picker means by each label.
+_LEGACY_TZ_TO_IANA: dict[str, str] = {
+    "EST": "America/New_York", "EDT": "America/New_York",
+    "CST": "America/Chicago", "CDT": "America/Chicago",
+    "MST": "America/Denver", "MDT": "America/Denver",
+    "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
+    "AKST": "America/Anchorage", "AKDT": "America/Anchorage",
+    "HST": "Pacific/Honolulu", "HDT": "Pacific/Honolulu",
+    "AST": "America/Puerto_Rico", "ADT": "America/Halifax",
+    "GMT": "UTC", "Z": "UTC", "UTC-5": "Etc/GMT+5", "UTC-8": "Etc/GMT+8",
+}
+
 # Module-level dedup set so we don't spam the log on every aggregation call.
 _warned_tzs: set[str] = set()
 _warned_multi_tz_signature: set[frozenset[str]] = set()
@@ -231,14 +272,16 @@ def _pick_account_tz(active_companies: list[dict[str, Any]]) -> str:
     for c in active_companies:
         tz = c.get("time_zone")
         if isinstance(tz, str) and tz:
-            if tz.upper() in _LEGACY_TZS and tz not in _warned_tzs:
-                _warned_tzs.add(tz)
-                logger.warning(
-                    "CallRail returned legacy TZ %r; this is treated as a "
-                    "fixed offset (no DST). Map to canonical IANA "
-                    "(e.g. 'America/New_York') in CallRail UI for correctness.",
-                    tz,
-                )
+            if tz.upper() in _LEGACY_TZS:
+                mapped = _LEGACY_TZ_TO_IANA.get(tz.upper(), "UTC")
+                if tz not in _warned_tzs:
+                    _warned_tzs.add(tz)
+                    logger.warning(
+                        "CallRail returned legacy TZ %r; using %s. Set a "
+                        "canonical IANA zone in the CallRail UI for correctness.",
+                        tz, mapped,
+                    )
+                return mapped
             return tz
     return "UTC"
 
@@ -299,7 +342,7 @@ def _coerce_days_int(days: Any) -> int | None:
         return None
     try:
         return int(days)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -314,11 +357,12 @@ def _validate_window(
 
     Args:
         require_window: If True, reject `days=0` AND no start_date. Without
-            this guard, _date_window returns {} and CallRail returns ALL-TIME
-            history, which silently blows up aggregating tools (cost
-            estimates, summaries). Default False to preserve existing
-            list_calls semantics where a single page of all-time data is
-            an acceptable fallback.
+            this guard, _date_window returns {} and CallRail applies its
+            default `recent` range (the previous 7 days), so aggregating
+            tools (cost estimates, summaries) would silently report a
+            window the caller never chose. Default False to preserve
+            list_calls semantics, where CallRail's default range is an
+            acceptable fallback for a single page.
     """
     # Reject `bool` early: in Python `isinstance(True, int)` is True,
     # which means `days=True` would silently be treated as `days=1`.
@@ -339,7 +383,7 @@ def _validate_window(
     elif days is not None and not isinstance(days, int):
         try:
             days = int(days)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return False, f"days={days!r} is not a valid integer."
     if days is not None and days < 0:
         return False, f"days={days} is negative."
@@ -364,7 +408,7 @@ def _validate_window(
     if require_window and (days is None or days <= 0) and not start_date:
         return False, (
             "Either days>=1 or an explicit start_date is required "
-            "(otherwise we'd aggregate all-time history)."
+            "(otherwise CallRail would pick its default 7-day range for you)."
         )
     return True, ""
 
@@ -374,6 +418,74 @@ def _validate_window(
 # window exactly (885 + 220 = 1105 total). There is NO `answered` param;
 # passing one is silently ignored and returns every call.
 VALID_ANSWER_STATUS: tuple[str, ...] = ("answered", "missed", "voicemail")
+
+# Documented GET /calls.json filters, live-verified 2026-10-05 (each value
+# below either changed total_records or appeared in CallRail's own 400 enum).
+VALID_CALL_DIRECTIONS: tuple[str, ...] = ("inbound", "outbound")
+VALID_CALL_DEVICES: tuple[str, ...] = ("desktop", "mobile")
+VALID_CALL_TYPES: tuple[str, ...] = ("first_call", "missed", "voicemails", "inbound", "outbound")
+VALID_LEAD_STATUS_FILTERS: tuple[str, ...] = ("good_lead", "not_a_lead", "not_scored")
+# PUT bodies accept good_lead / not_a_lead (or null to clear, not exposed).
+VALID_LEAD_STATUS_WRITES: tuple[str, ...] = ("good_lead", "not_a_lead")
+VALID_FORM_SORT_FIELDS: tuple[str, ...] = ("submitted_at", "form_url", "created_at")
+VALID_COOKIE_DURATION_UNITS: tuple[str, ...] = ("months", "weeks", "days")
+VALID_SORT_ORDERS: tuple[str, ...] = ("asc", "desc")
+VALID_FORM_STATS_GROUP_BY: tuple[str, ...] = (
+    "source", "keywords", "campaign", "referrer", "landing_page", "form_name", "company",
+)
+VALID_TAG_LEVELS: tuple[str, ...] = ("account", "company")
+VALID_TAG_STATUSES: tuple[str, ...] = ("enabled", "disabled")
+VALID_LEAD_SORT_FIELDS: tuple[str, ...] = ("created_at", "name", "email")
+
+
+def _validate_choice(value: Any, name: str, choices: tuple[str, ...]) -> tuple[bool, str]:
+    if not isinstance(value, str) or value not in choices:
+        return False, f"{name}={value!r} must be one of {choices}."
+    return True, ""
+
+
+def _validate_time_zone(tz: Any) -> tuple[bool, str]:
+    """CallRail accepts IANA zone names only (its 400 response lists them)."""
+    if not isinstance(tz, str) or not tz.strip():
+        return False, "time_zone must be an IANA zone name such as 'America/New_York'."
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(tz)
+    except (KeyError, ValueError, OSError):
+        return False, f"time_zone={tz!r} is not a known IANA zone (for example 'America/Chicago')."
+    return True, ""
+
+
+def _validate_fields_list(fields: Any, name: str, allowed: tuple[str, ...]) -> tuple[bool, str]:
+    """Validate a comma-separated `fields` value against an enum."""
+    if not isinstance(fields, str) or not fields.strip():
+        return False, f"{name} must be a non-empty comma-separated string."
+    bad = [f.strip() for f in fields.split(",") if f.strip() not in allowed]
+    if bad:
+        return False, f"{name} contains unknown values {bad}; valid: {allowed}."
+    return True, ""
+
+
+def _validate_filter_list(values: Any, name: str) -> tuple[bool, str]:
+    if not isinstance(values, list) or not values or not all(
+        isinstance(v, str) and v.strip() for v in values
+    ):
+        return False, f"{name} must be a non-empty list of non-empty strings."
+    return True, ""
+
+
+def _human_answered(call: dict[str, Any]) -> bool:
+    """True only when a person picked up.
+
+    CallRail sets `answered=true` on calls that reached voicemail (the
+    system answered), yet every CallRail filter and report counts those as
+    MISSED: `answer_status=missed` returns them and `answer_status=answered`
+    excludes them (live-verified 2026-10-05: 199 missed = 139 unanswered +
+    60 voicemail; 751 answered with zero voicemail). Client-side counts must
+    use the same definition or they disagree with the CallRail dashboard.
+    """
+    return bool(call.get("answered")) and not bool(call.get("voicemail"))
 
 
 def _resolve_answer_status(
@@ -415,7 +527,7 @@ def _clamp_per_page(per_page: int) -> int:
     TypeError from the < comparison; 2026-07 all-tool fuzz finding)."""
     try:
         pp = int(per_page)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1
     if pp < 1:
         return 1
@@ -427,7 +539,7 @@ def _clamp_page(page: int) -> int:
     inline `max(1, page)` raised raw TypeError on string/None pages."""
     try:
         pg = int(page)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1
     return max(1, pg)
 
@@ -457,6 +569,26 @@ def _err(e: CallRailError) -> str:
 
 def _err_msg(message: str) -> str:
     return json.dumps({"error": True, "status": None, "message": message}, indent=2)
+
+
+def _form_submission_err(e: CallRailError) -> str:
+    """`_err`, plus a hint for the one 403 that is not an auth problem."""
+    if e.status != 403:
+        return _err(e)
+    return json.dumps({
+        "error": True,
+        "status": 403,
+        "message": str(e),
+        "hint": (
+            "CallRail returns 403 on form-submission endpoints when no "
+            "company on the account has form tracking enabled (every "
+            "company shows form_capture=false in list_companies), or when "
+            "the API key's user cannot access forms. Enable Form Tracking "
+            "for at least one company in CallRail, then retry. form_stats "
+            "(forms/summary) is not gated the same way, so it can report "
+            "zero forms while these endpoints return 403."
+        ),
+    }, indent=2)
 
 
 def _digits_only(s: str) -> str:
@@ -620,25 +752,30 @@ def _validate_tracker_status(value: str | None) -> tuple[bool, str]:
 
 # ---- Tools ----
 
-@mcp.tool()
-def list_accounts() -> str:
+@mcp.tool(annotations=_READ)
+def list_accounts(fields: str | None = None) -> str:
     """List CallRail accounts accessible to this API key.
 
     Most users have one account per agency. The returned `id` is used as
-    `account_id` in all other tools (auto-resolved if omitted).
+    `account_id` in all other tools (auto-resolved if omitted, or pinned
+    with the CALLRAIL_ACCOUNT_ID environment variable). `fields`
+    (comma-separated) adds optional attributes such as 'numeric_id', the
+    number shown in CallRail app URLs.
     """
     try:
-        return _ok(client.get("a.json"))
+        return _ok(client.get("a.json", {"fields": fields} if fields else {}))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_companies(
     account_id: str | None = None,
     per_page: int = 250,
     status: str | None = None,
     page: int = 1,
+    search: str | None = None,
+    fields: str | None = None,
 ) -> str:
     """List companies (client businesses) under a CallRail account.
 
@@ -650,12 +787,21 @@ def list_companies(
         page: 1-indexed. Agencies with more than `per_page` companies
             need this to reach the rest. Previously there was no way
             to fetch page 2 via this tool.
+
+    `search` matches the company name; `fields` (comma-separated) adds
+    optional attributes, for example 'verified_caller_ids' (the readable
+    list of outbound caller IDs, which the caller_ids endpoint itself gates
+    behind a permission).
     """
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if status:
             params["status"] = status
+        if search:
+            params["search"] = search
+        if fields:
+            params["fields"] = fields
         return _ok(client.get(f"a/{aid}/companies.json", params))
     except CallRailError as e:
         return _err(e)
@@ -687,15 +833,125 @@ VALID_SOURCE_TYPES: tuple[str, ...] = (
     "facebook_all",          # Facebook/Meta ads (observed in production)
     "bing_all",              # Bing/Microsoft Ads (observed in production)
 )
+# Per-source-type fields of the Call Source object (apidocs "Source Tracker
+# Call Sources"): 'search' takes search_engine + search_type, the two
+# landing types take `landing`, 'web_referrer' takes `referrer`.
+VALID_SEARCH_ENGINES: tuple[str, ...] = ("google", "yahoo", "bing", "all")
+VALID_SEARCH_TYPES: tuple[str, ...] = ("paid", "organic", "all")
+_BASIC_CALL_FLOW_KEYS: tuple[str, ...] = (
+    "recording_enabled", "destination_number", "greeting_text", "greeting_recording_url",
+)
 
 
-@mcp.tool()
+def _source_object_extras(
+    tracker_type: str,
+    source_type: str,
+    *,
+    search_engine: str | None,
+    search_type: str | None,
+    landing: str | None,
+    referrer: str | None,
+) -> tuple[dict[str, Any], str]:
+    """Build the per-source-type fields of CallRail's Call Source object.
+
+    Returns (extras, error_message); error_message is "" when the
+    combination is valid for `source_type`.
+    """
+    given = {
+        "search_engine": search_engine,
+        "search_type": search_type,
+        "landing": landing,
+        "referrer": referrer,
+    }
+    supplied = {k: v for k, v in given.items() if v is not None}
+    if tracker_type != "source":
+        if supplied:
+            return {}, f"{', '.join(sorted(supplied))} only apply to type='source' trackers."
+        return {}, ""
+    needed: tuple[str, ...]
+    if source_type == "search":
+        needed = ("search_engine", "search_type")
+    elif source_type in ("landing_url", "landing_params"):
+        needed = ("landing",)
+    elif source_type == "web_referrer":
+        needed = ("referrer",)
+    else:
+        needed = ()
+    extra_keys = sorted(set(supplied) - set(needed))
+    if extra_keys:
+        return {}, f"{', '.join(extra_keys)} do not apply to source_type={source_type!r}."
+    missing = [k for k in needed if k not in supplied]
+    if missing:
+        return {}, f"source_type={source_type!r} requires {', '.join(missing)}."
+    for key, val in supplied.items():
+        if not isinstance(val, str) or not val.strip():
+            return {}, f"{key} must be a non-empty string."
+    if "search_engine" in supplied and supplied["search_engine"] not in VALID_SEARCH_ENGINES:
+        return {}, f"search_engine must be one of {VALID_SEARCH_ENGINES}."
+    if "search_type" in supplied and supplied["search_type"] not in VALID_SEARCH_TYPES:
+        return {}, f"search_type must be one of {VALID_SEARCH_TYPES}."
+    return dict(supplied), ""
+
+
+def _validate_swap_targets(swap_targets: Any) -> tuple[bool, str]:
+    """swap_targets: phone numbers in any format (CallRail normalizes them)."""
+    if not isinstance(swap_targets, list) or not swap_targets:
+        return False, "swap_targets must be a non-empty list of phone numbers (any formatting)."
+    if len(swap_targets) > _MAX_TAGS_PER_REQUEST:
+        return False, f"swap_targets has {len(swap_targets)} entries; max {_MAX_TAGS_PER_REQUEST}."
+    for entry in swap_targets:
+        digits = re.sub(r"\D", "", entry) if isinstance(entry, str) else ""
+        if not 7 <= len(digits) <= 15:
+            return False, f"swap_targets entry {entry!r} does not look like a phone number."
+    return True, ""
+
+
+def _merge_basic_call_flow(current: Any, changes: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Overlay `changes` on a tracker's current basic call flow.
+
+    CallRail's PUT /trackers replaces the whole call_flow object, so the
+    current one is read first and only the requested keys change. Advanced
+    flows (IVR menus, schedules, voicemail steps) are refused: the API can
+    only replace them with a basic flow, which would destroy them.
+    Returns (call_flow, error_message).
+    """
+    if not isinstance(current, dict) or not current:
+        if "destination_number" not in changes:
+            return {}, (
+                "CallRail did not return this tracker's current call flow, so the change "
+                "cannot be merged safely. Pass destination_number as well."
+            )
+        base: dict[str, Any] = {"type": "basic"}
+    else:
+        if current.get("type", "basic") != "basic":
+            return {}, (
+                f"This tracker uses a {current.get('type')!r} call flow (IVR menu, schedule "
+                "or voicemail steps). The API can only replace it with a basic flow, which "
+                "would destroy that configuration; edit it in the CallRail UI instead."
+            )
+        base = {"type": "basic"}
+        for key in _BASIC_CALL_FLOW_KEYS:
+            if key in current:
+                base[key] = current[key]
+        if not base.get("destination_number") and "destination_number" not in changes:
+            return {}, (
+                "The current call flow has no destination_number; pass destination_number "
+                "as well."
+            )
+    base.update(changes)
+    return base, ""
+
+
+@mcp.tool(annotations=_READ)
 def list_trackers(
     account_id: str | None = None,
     company_id: str | None = None,
     per_page: int = 250,
     page: int = 1,
     status: str | None = None,
+    type: str | None = None,
+    search: str | None = None,
+    fields: str | None = None,
 ) -> str:
     """List tracking phone numbers (trackers). Each tracker maps a pool of
     phone numbers to a traffic source (Google Ads, Organic, Direct, etc.).
@@ -707,10 +963,17 @@ def list_trackers(
         page: 1-indexed.
         status: Filter by status. Defaults to None (returns all, including
             soft-deleted/disabled). Common values: 'active', 'disabled'.
+
+    `type` ('source' | 'session') filters by tracker kind; `search` matches
+    the tracker name; `fields` (comma-separated) adds optional attributes.
     """
     ok, msg = _validate_tracker_status(status)
     if not ok:
         return _err_msg(msg)
+    if type is not None:
+        ok, msg = _validate_choice(type, "type", VALID_TRACKER_TYPES)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
@@ -718,12 +981,15 @@ def list_trackers(
             params["company_id"] = company_id
         if status:
             params["status"] = status
+        for key, val in (("type", type), ("search", search), ("fields", fields)):
+            if val:
+                params[key] = val
         return _ok(client.get(f"a/{aid}/trackers.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_tracker(tracker_id: str, account_id: str | None = None) -> str:
     """Get full detail for a specific tracker.
 
@@ -744,7 +1010,7 @@ def get_tracker(tracker_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_CREATE)
 def create_tracker(
     name: str,
     company_id: str,
@@ -760,6 +1026,12 @@ def create_tracker(
     greeting_text: str | None = None,
     sms_enabled: bool = True,
     account_id: str | None = None,
+    search_engine: str | None = None,
+    search_type: str | None = None,
+    landing: str | None = None,
+    referrer: str | None = None,
+    swap_targets: list[str] | None = None,
+    campaign_name: str | None = None,
 ) -> str:
     """⚠️  Create a new tracking phone number (tracker). **THIS COSTS MONEY.**
 
@@ -803,6 +1075,19 @@ def create_tracker(
         recording_enabled: Record the call audio. Default True.
         greeting_text: Optional automated greeting text-to-speech.
         sms_enabled: Allow this number to receive/send SMS. Default True.
+        search_engine / search_type: Required when source_type='search'.
+            search_engine is 'google' | 'yahoo' | 'bing' | 'all';
+            search_type is 'paid' | 'organic' | 'all' (so Google Ads
+            traffic is search_engine='google', search_type='paid').
+        landing: Required for source_type='landing_url' (a page, e.g.
+            'www.example.com/promo1') or 'landing_params' (a query string
+            fragment, e.g. 'promo=1').
+        referrer: Required for source_type='web_referrer' (a referring
+            site, e.g. 'facebook.com').
+        swap_targets: Phone numbers on the website that this tracker's
+            number should replace (any formatting). Defaults to the
+            destination number when omitted.
+        campaign_name: Campaign label for reports. Source trackers only.
         account_id: Auto-resolves if omitted.
 
     Returns the created tracker including its newly-provisioned tracking_numbers.
@@ -839,6 +1124,25 @@ def create_tracker(
             f"Note: 'google_ad_extension' is what Google Ads call extensions use; "
             f"for general Google Ads / Bing Ads / Facebook DNI use type='session'."
         )
+    source_extra, source_err = _source_object_extras(
+        type, source_type, search_engine=search_engine, search_type=search_type,
+        landing=landing, referrer=referrer,
+    )
+    if source_err:
+        return _err_msg(source_err)
+    if swap_targets is not None:
+        ok, msg = _validate_swap_targets(swap_targets)
+        if not ok:
+            return _err_msg(msg)
+    if campaign_name is not None:
+        ok, msg = _require_non_empty(campaign_name, "campaign_name")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_length(campaign_name, "campaign_name", _MAX_TRACKER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
+        if type != "source":
+            return _err_msg("campaign_name can only be set on source trackers (CallRail docs).")
     # Tracking-number provisioning rules.
     if toll_free and area_code:
         return _err_msg(
@@ -880,7 +1184,7 @@ def create_tracker(
     if greeting_text is not None:
         body["call_flow"]["greeting_text"] = greeting_text
     if type == "source":
-        body["source"] = {"type": source_type}
+        body["source"] = {"type": source_type, **source_extra}
         tn: dict[str, Any] = {}
         if toll_free:
             tn["toll_free"] = True
@@ -907,6 +1211,10 @@ def create_tracker(
     if whisper_message is not None:
         body["whisper_message"] = whisper_message
     body["sms_enabled"] = sms_enabled
+    if swap_targets is not None:
+        body["swap_targets"] = swap_targets
+    if campaign_name is not None:
+        body["campaign_name"] = campaign_name
 
     try:
         aid = client.resolve_account_id(account_id)
@@ -915,7 +1223,7 @@ def create_tracker(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_tracker(
     tracker_id: str,
     account_id: str | None = None,
@@ -924,21 +1232,38 @@ def update_tracker(
     whisper_message: str | None = None,
     greeting_text: str | None = None,
     sms_enabled: bool | None = None,
+    recording_enabled: bool | None = None,
+    greeting_recording_url: str | None = None,
+    swap_targets: list[str] | None = None,
+    campaign_name: str | None = None,
 ) -> str:
-    """Update a tracker's mutable settings: name, destination, whisper, greeting, SMS.
+    """Update a tracker's mutable settings: name, whisper, SMS, swap targets,
+    campaign name, and the basic call flow (destination, recording,
+    greeting).
+
+    CallRail's PUT /trackers replaces the entire `call_flow` object, so when
+    any call-flow field is given this tool first reads the tracker and merges
+    the change into its current basic flow; the destination, recording flag
+    and greeting you did not mention are preserved. Trackers on an advanced
+    call flow (IVR menus, schedules, voicemail steps) are refused for
+    call-flow edits because the API could only replace that flow with a
+    basic one.
 
     Args:
         tracker_id: 'TRK...' id.
         account_id: Auto-resolves if omitted.
         name: New display name.
-        destination_number: Where calls forward (e.g. "+14129548337"). Updates
-            the call_flow's destination too.
-        whisper_message: New whisper text.
-        greeting_text: New automated greeting. **If supplied, you must also
-            supply destination_number**. CallRail's PUT /trackers replaces the
-            entire call_flow object, so updating only greeting_text would
-            silently zero out the destination, breaking the tracker.
+        destination_number: Where calls forward (e.g. "+14129548337").
+        whisper_message: New whisper text (max 500 chars).
+        greeting_text: New text-to-speech greeting (max 500 chars).
         sms_enabled: Toggle SMS on/off.
+        recording_enabled: Toggle call recording for this tracker.
+        greeting_recording_url: http(s) URL of a .wav/.mp3 greeting.
+            CallRail copies the file once; greeting_text is cleared so the
+            recording takes effect (pass one or the other, not both).
+        swap_targets: Phone numbers on the website that this tracker's
+            number replaces (any formatting). Replaces the current list.
+        campaign_name: Campaign label for reports. Source trackers only.
 
     Field-level rules:
         - `name`, `destination_number`, `whisper_message`, `greeting_text`
@@ -986,41 +1311,72 @@ def update_tracker(
         ok, msg = _validate_phone(destination_number, "destination_number")
         if not ok:
             return _err_msg(msg)
-    # CRITICAL: greeting_text alone would replace call_flow with an object
-    # that's missing destination_number, breaking the tracker. CallRail's
-    # PUT /trackers does NOT do partial-merge inside call_flow, only at
-    # the top level. Force the caller to be explicit.
-    if greeting_text is not None and destination_number is None:
+    if greeting_text is not None and greeting_recording_url is not None:
         return _err_msg(
-            "Updating greeting_text requires also passing destination_number "
-            "(CallRail's PUT replaces the entire call_flow object; supplying "
-            "only greeting_text would zero out the destination). Pass both, "
-            "or call get_tracker first to read the existing destination_number."
+            "Pass greeting_text or greeting_recording_url, not both: CallRail plays the "
+            "text greeting whenever one is set, so the recording would be ignored."
         )
+    if greeting_recording_url is not None:
+        ok, msg = _require_non_empty(greeting_recording_url, "greeting_recording_url")
+        if not ok:
+            return _err_msg(msg)
+        if not greeting_recording_url.lower().startswith(("http://", "https://")):
+            return _err_msg("greeting_recording_url must be an http(s) URL to a .wav or .mp3 file.")
+    if recording_enabled is not None and not isinstance(recording_enabled, bool):
+        return _err_msg("recording_enabled must be true or false.")
+    if swap_targets is not None:
+        ok, msg = _validate_swap_targets(swap_targets)
+        if not ok:
+            return _err_msg(msg)
+    if campaign_name is not None:
+        ok, msg = _require_non_empty(campaign_name, "campaign_name")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_length(campaign_name, "campaign_name", _MAX_TRACKER_NAME_LEN)
+        if not ok:
+            return _err_msg(msg)
 
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
-    if destination_number is not None:
-        body["destination_number"] = destination_number
-        body["call_flow"] = {"type": "basic", "destination_number": destination_number}
     if whisper_message is not None:
         body["whisper_message"] = whisper_message
-    if greeting_text is not None:
-        # destination_number guaranteed present by validation above.
-        body["call_flow"]["greeting_text"] = greeting_text
     if sms_enabled is not None:
         body["sms_enabled"] = sms_enabled
-    if not body:
+    if swap_targets is not None:
+        body["swap_targets"] = swap_targets
+    if campaign_name is not None:
+        body["campaign_name"] = campaign_name
+    flow_changes: dict[str, Any] = {}
+    if destination_number is not None:
+        flow_changes["destination_number"] = destination_number
+    if recording_enabled is not None:
+        flow_changes["recording_enabled"] = recording_enabled
+    if greeting_text is not None:
+        flow_changes["greeting_text"] = greeting_text
+    if greeting_recording_url is not None:
+        # Documented: greeting_text must be null for the recording to apply.
+        flow_changes["greeting_recording_url"] = greeting_recording_url
+        flow_changes["greeting_text"] = None
+    if not body and not flow_changes:
         return _err_msg("No fields supplied to update.")
     try:
         aid = client.resolve_account_id(account_id)
+        if flow_changes:
+            # PUT replaces the whole call_flow object, so read the current
+            # one and merge; a partial object would wipe the destination,
+            # recording flag or greeting it did not mention.
+            current = client.get(f"a/{aid}/trackers/{tracker_id}.json")
+            merged, flow_err = _merge_basic_call_flow(current.get("call_flow"), flow_changes)
+            if flow_err:
+                return _err_msg(flow_err)
+            body["call_flow"] = merged
         return _ok(client.put(f"a/{aid}/trackers/{tracker_id}.json", body))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DELETE)
 def delete_tracker(tracker_id: str, account_id: str | None = None) -> str:
     """Delete (disable) a tracker. Soft-removes it from active trackers; the
     tracker keeps its call history but stops receiving new calls. The
@@ -1048,7 +1404,7 @@ def delete_tracker(tracker_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_calls(
     account_id: str | None = None,
     company_id: str | None = None,
@@ -1061,6 +1417,16 @@ def list_calls(
     per_page: int = 100,
     page: int = 1,
     fields: str | None = None,
+    search: str | None = None,
+    direction: str | None = None,
+    device: str | None = None,
+    call_type: str | None = None,
+    lead_status: str | None = None,
+    tracker_id: str | None = None,
+    tags: list[str] | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """List calls. Paginated. Filterable by company, date window, and
     answer status.
@@ -1072,7 +1438,9 @@ def list_calls(
         start_date: 'YYYY-MM-DD'.
         end_date: 'YYYY-MM-DD' (defaults to today).
         answer_status: Server-side filter. One of 'answered', 'missed',
-            'voicemail'. This is CallRail's real filter parameter.
+            'voicemail'. This is CallRail's real filter parameter. Note that
+            'missed' includes calls that reached voicemail (CallRail's own
+            definition) and 'voicemail' selects only that subset.
         answered: DEPRECATED alias kept for backwards compatibility.
             'true' maps to answer_status='answered', 'false' to 'missed'.
             (CallRail has no `answered` query param; passing it used to be
@@ -1090,6 +1458,19 @@ def list_calls(
             'company_name,source_name,keywords,landing_page_url,device_type,
             first_call,value,tags,note,gclid,fbclid,utm_source,utm_medium,
             utm_campaign,utm_content,utm_term,referrer_domain'.
+
+    Server-side filters (documented, live-verified 2026-10-05): `search`
+    matches business_phone_number, customer_name, customer_number, note,
+    source and tracking_phone_number (any fragment of a phone number works);
+    `direction` ('inbound' | 'outbound'); `device` ('desktop' | 'mobile');
+    `call_type` ('first_call' | 'missed' | 'voicemails' | 'inbound' |
+    'outbound'); `lead_status` ('good_lead' | 'not_a_lead' | 'not_scored');
+    `tracker_id`; `tags` (calls carrying ANY of the listed tag names);
+    `sort` (a call field such as 'start_time', 'duration' or
+    'customer_name') with `order` ('asc' | 'desc'). `time_zone` (IANA) sets
+    the day boundaries CallRail applies to the window and is also used to
+    compute "today" for `days`; without it CallRail uses the API key
+    owner's time zone.
     """
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
@@ -1097,10 +1478,43 @@ def list_calls(
     status, msg = _resolve_answer_status(answered, answer_status)
     if msg:
         return _err_msg(msg)
+    for val, nm, choices in (
+        (direction, "direction", VALID_CALL_DIRECTIONS),
+        (device, "device", VALID_CALL_DEVICES),
+        (call_type, "call_type", VALID_CALL_TYPES),
+        (lead_status, "lead_status", VALID_LEAD_STATUS_FILTERS),
+        (order, "order", VALID_SORT_ORDERS),
+    ):
+        if val is not None:
+            ok, msg = _validate_choice(val, nm, choices)
+            if not ok:
+                return _err_msg(msg)
+    if tracker_id is not None:
+        ok, msg = _validate_id_shape(tracker_id, "tracker_id", prefix="TRK")
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None:
+        ok, msg = _validate_filter_list(tags, "tags")
+        if not ok:
+            return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
-        params.update(_date_window(days, start_date, end_date))
+        params.update(_date_window(days, start_date, end_date, tz=time_zone or "UTC"))
+        for key, val in (
+            ("search", search), ("direction", direction), ("device", device),
+            ("call_type", call_type), ("lead_status", lead_status),
+            ("tracker_id", tracker_id), ("sort", sort), ("order", order),
+            ("time_zone", time_zone),
+        ):
+            if val:
+                params[key] = val
+        if tags:
+            params["tags[]"] = tags
         if company_id:
             params["company_id"] = company_id
         if status:
@@ -1137,7 +1551,7 @@ def list_calls(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_call(call_id: str, account_id: str | None = None, fields: str | None = None) -> str:
     """Get full detail for a specific call.
 
@@ -1162,13 +1576,14 @@ def get_call(call_id: str, account_id: str | None = None, fields: str | None = N
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def call_summary(
     account_id: str | None = None,
     company_id: str | None = None,
     days: int = 7,
     start_date: str | None = None,
     end_date: str | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """Summarize calls over a date window.
 
@@ -1176,24 +1591,38 @@ def call_summary(
     duration, and breakdowns by `source` and `source_name`. Useful for
     weekly/monthly rollups without pulling every call into context.
 
+    Counting rule: `missed` includes calls that reached voicemail, exactly
+    as CallRail's own `answer_status=missed` filter and dashboard do, even
+    though CallRail marks those calls `answered=true`. `voicemail` reports
+    that subset separately.
+
     Note: requires `days>=1` or an explicit `start_date`. Without a window
     this would paginate the entire account history (potentially 50+ pages
     of 250 calls each), which is rarely what callers want.
+
+    `time_zone` (IANA) aligns CallRail's day boundaries with the window and
+    is used to compute "today" for `days`.
     """
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
             "per_page": MAX_PER_PAGE,
             "fields": "source,source_name,answered,first_call,duration",
         }
-        params.update(_date_window(days, start_date, end_date))
+        params.update(_date_window(days, start_date, end_date, tz=time_zone or "UTC"))
         if company_id:
             params["company_id"] = company_id
+        if time_zone:
+            params["time_zone"] = time_zone
 
-        total = answered = missed = first_time = repeat = duration_total = 0
+        total = answered = missed = voicemail = first_time = repeat = duration_total = 0
         by_source: dict[str, int] = {}
         by_source_name: dict[str, int] = {}
 
@@ -1202,10 +1631,12 @@ def call_summary(
             f"a/{aid}/calls.json", params, items_key="calls", max_pages=50, stats=scan,
         ):
             total += 1
-            if c.get("answered"):
+            if _human_answered(c):
                 answered += 1
             else:
                 missed += 1
+                if c.get("voicemail"):
+                    voicemail += 1
             if c.get("first_call"):
                 first_time += 1
             else:
@@ -1215,23 +1646,26 @@ def call_summary(
             raw_duration = c.get("duration") or 0
             try:
                 duration_total += int(float(raw_duration))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 logger.warning(
                     "call_summary: skipping call with malformed "
                     "duration=%r in call %s", raw_duration, c.get("id", "?"),
                 )
-            src = c.get("source") or "(none)"
+            src = c.get("source")
+            src = src if isinstance(src, str) and src else "(none)"
             by_source[src] = by_source.get(src, 0) + 1
-            sname = c.get("source_name") or "(none)"
+            sname = c.get("source_name")
+            sname = sname if isinstance(sname, str) and sname else "(none)"
             by_source_name[sname] = by_source_name.get(sname, 0) + 1
 
         return _ok(
             {
-                "window": _date_window(days, start_date, end_date),
+                "window": _date_window(days, start_date, end_date, tz=time_zone or "UTC"),
                 "company_id": company_id,
                 "total_calls": total,
                 "answered": answered,
                 "missed": missed,
+                "voicemail": voicemail,
                 "first_time_callers": first_time,
                 "repeat_callers": repeat,
                 "total_duration_seconds": duration_total,
@@ -1251,7 +1685,7 @@ def call_summary(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_form_submissions(
     account_id: str | None = None,
     company_id: str | None = None,
@@ -1261,6 +1695,12 @@ def list_form_submissions(
     per_page: int = 100,
     page: int = 1,
     fields: str | None = None,
+    lead_status: str | None = None,
+    tags: list[str] | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    time_zone: str | None = None,
+    person_lead: bool | None = None,
 ) -> str:
     """List form submissions captured by CallRail's Form Tracking.
     Paginated. Filterable by company and date window.
@@ -1283,24 +1723,64 @@ def list_form_submissions(
         `total_records`, and `form_submissions[]`. Each submission has
         id ('FOR...'), submitted_at, customer details (if captured),
         and a `form_data` dict keyed by form field name.
+
+    Filters: `lead_status` ('good_lead' | 'not_a_lead' | 'not_scored'),
+    `tags` (any of), `person_lead` (only submissions linked to a lead),
+    `sort` ('submitted_at' | 'form_url'; 'created_at' is being deprecated
+    by CallRail) with `order` ('asc' | 'desc'), and `time_zone` (IANA).
+    Requires form tracking to be enabled
+    on at least one company; otherwise CallRail returns 403 (the error
+    carries a hint).
     """
     ok, msg = _validate_window(days, start_date, end_date)
     if not ok:
         return _err_msg(msg)
+    if lead_status is not None:
+        ok, msg = _validate_choice(lead_status, "lead_status", VALID_LEAD_STATUS_FILTERS)
+        if not ok:
+            return _err_msg(msg)
+    if sort is not None:
+        ok, msg = _validate_choice(sort, "sort", VALID_FORM_SORT_FIELDS)
+        if not ok:
+            return _err_msg(msg)
+    if order is not None:
+        ok, msg = _validate_choice(order, "order", VALID_SORT_ORDERS)
+        if not ok:
+            return _err_msg(msg)
+    if person_lead is not None and not isinstance(person_lead, bool):
+        return _err_msg("person_lead must be true or false.")
+    if tags is not None:
+        ok, msg = _validate_filter_list(tags, "tags")
+        if not ok:
+            return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
-        params.update(_date_window(days, start_date, end_date))
+        params.update(_date_window(days, start_date, end_date, tz=time_zone or "UTC"))
         if company_id:
             params["company_id"] = company_id
+        for key, val in (
+            ("lead_status", lead_status), ("sort", sort), ("order", order),
+            ("time_zone", time_zone),
+        ):
+            if val:
+                params[key] = val
+        if tags:
+            params["tags[]"] = tags
+        if person_lead is not None:
+            params["person_lead"] = "true" if person_lead else "false"
         if fields:
             params["fields"] = fields
         return _ok(client.get(f"a/{aid}/form_submissions.json", params))
     except CallRailError as e:
-        return _err(e)
+        return _form_submission_err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_text_messages(
     account_id: str | None = None,
     company_id: str | None = None,
@@ -1346,32 +1826,57 @@ def list_text_messages(
         return _err(e)
 
 
-@mcp.tool()
-def list_users(account_id: str | None = None) -> str:
-    """List all users on the account. Returns a single page of up to
-    `MAX_PER_PAGE` users (no pagination support; adequate for small and
-    medium agency accounts).
+@mcp.tool(annotations=_READ)
+def list_users(
+    account_id: str | None = None,
+    company_id: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    per_page: int = 250,
+    page: int = 1,
+) -> str:
+    """List users on the account. Paginated.
 
     Args:
         account_id: CallRail account ID. Auto-resolves if omitted.
+        company_id: Only users with access to this company.
+        search: Matches first_name, last_name and email.
+        sort: User field to sort by, with `order` ('asc' | 'desc').
+        per_page: Page size (max 250).
+        page: 1-indexed.
 
     Returns:
-        JSON string with `users[]`. Each user has id ('USR...'),
-        email, first_name, last_name, role
-        ('admin' | 'manager' | 'reporting'), accepted_at, time_zone,
-        and `company_ids[]` the user has access to.
+        JSON string with `users[]`. Each user has id ('USR...'), email,
+        first_name, last_name, name, role ('admin' | 'manager' |
+        'reporting'), `accepted` (whether the invitation was accepted) and
+        `companies[]` ({id, name}) the user can access.
     """
+    if company_id is not None:
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
+    if order is not None:
+        ok, msg = _validate_choice(order, "order", VALID_SORT_ORDERS)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/users.json", {"per_page": MAX_PER_PAGE}))
+        params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
+        for key, val in (("company_id", company_id), ("search", search), ("sort", sort), ("order", order)):
+            if val:
+                params[key] = val
+        return _ok(client.get(f"a/{aid}/users.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_call_recording(call_id: str, account_id: str | None = None) -> str:
-    """Get the recording URL for a call. Returns a short-lived signed
-    URL. Fetch and use it within a few minutes before it expires.
+    """Get the recording URL for a call. CallRail documents the link as
+    good for at least 24 hours but not guaranteed forever; HIPAA accounts
+    receive a temporary URL that expires in about 24 hours. Play or
+    download it promptly rather than storing the link.
 
     Recording must be enabled on the company (CallRail UI > Settings >
     Account). Calls placed BEFORE recording was enabled have no
@@ -1383,7 +1888,7 @@ def get_call_recording(call_id: str, account_id: str | None = None) -> str:
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
-        JSON string with `url` (signed audio URL, typically MP3) plus
+        JSON string with `url` (audio URL, typically MP3) plus
         recording metadata. Empty `url` typically means recording was
         disabled at call time, or the user opted out via the call-flow
         recording disclaimer.
@@ -1401,30 +1906,37 @@ def get_call_recording(call_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+_TRANSCRIPT_FIELDS = (
+    "transcription,conversational_transcript,call_summary,call_highlights,"
+    "keywords_spotted,sentiment,speaker_percent"
+)
+
+
+@mcp.tool(annotations=_READ)
 def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
-    """Get the AI transcript for a call. Requires CallRail Conversation
-    Intelligence (CallScribe) to be enabled on the company at the time
-    the call was placed.
+    """Get the transcript and conversation-intelligence fields for a call.
 
-    If CallScribe was enabled AFTER the call, no transcript exists;
-    CallRail does not retroactively transcribe.
+    Requests the documented field selection on GET /calls/{id}.json
+    (`transcription`, `conversational_transcript`, `call_summary`,
+    `call_highlights`, `keywords_spotted`, `sentiment`, `speaker_percent`)
+    and falls back to the older /calls/{id}/transcription.json endpoint
+    when those fields come back empty.
 
-    ⚠️  As of CallRail's 2026-05-21 API change, transcript data requires
-    a **Premium Conversation Intelligence** subscription; without it,
-    the endpoint 404s (and the `transcription` field on calls returns
-    null) even when a transcript exists. A 404 here therefore means
-    EITHER "no transcript for this call" OR "plan doesn't include
-    transcript API access"; the error envelope includes a hint.
+    Requires CallRail Conversation Intelligence (CallScribe) to have been
+    enabled on the company at the time of the call; CallRail does not
+    retroactively transcribe. Since CallRail's 2026-05-21 API change the
+    transcript fields return null without a Premium Conversation
+    Intelligence subscription even when a transcript exists in the UI, so
+    an empty result is reported with a hint that names both causes.
 
     Args:
         call_id: 'CAL...' id.
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
-        JSON string with the transcription including segments
-        (text per speaker turn), per-segment confidence scores,
-        and durations.
+        JSON string with `id` plus whichever of the fields above CallRail
+        returned (`conversational_transcript` is a list of
+        {speaker, phrase, start} turns).
     """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
@@ -1434,29 +1946,39 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/calls/{call_id}/transcription.json"))
+        call = client.get(f"a/{aid}/calls/{call_id}.json", {"fields": _TRANSCRIPT_FIELDS})
     except CallRailError as e:
-        if e.status == 404:
-            # Disambiguate the two 404 causes so users don't chase a
-            # nonexistent bug in their CallScribe settings.
-            return json.dumps({
-                "error": True,
-                "status": 404,
-                "message": str(e),
-                "hint": (
-                    "404 here means either (a) no transcript exists for "
-                    "this call (CallScribe wasn't enabled at call time; "
-                    "CallRail does not retroactively transcribe), or "
-                    "(b) since CallRail's 2026-05-21 API change, your "
-                    "plan lacks Premium Conversation Intelligence, which "
-                    "is now required for transcript API access even when "
-                    "a transcript exists in the UI."
-                ),
-            }, indent=2)
         return _err(e)
+    if call.get("transcription") or call.get("conversational_transcript"):
+        out: dict[str, Any] = {"id": call.get("id", call_id)}
+        for key in _TRANSCRIPT_FIELDS.split(","):
+            if key in call:
+                out[key] = call[key]
+        return _ok(out)
+    # The documented fields were empty. The older per-call endpoint is no
+    # longer documented (it 404s on current accounts) but is cheap to try.
+    try:
+        legacy = client.get(f"a/{aid}/calls/{call_id}/transcription.json")
+        if any(v for v in legacy.values()):
+            return _ok(legacy)
+    except CallRailError as e:
+        if e.status != 404:
+            return _err(e)
+    return json.dumps({
+        "error": True,
+        "status": 404,
+        "message": "No transcript is available for this call.",
+        "hint": (
+            "Either (a) no transcript exists (CallScribe was not enabled on the "
+            "company at call time; CallRail does not retroactively transcribe), "
+            "or (b) since CallRail's 2026-05-21 API change the plan lacks "
+            "Premium Conversation Intelligence, which is required for transcript "
+            "API access even when a transcript exists in the UI."
+        ),
+    }, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def search_calls_by_number(
     phone_number: str,
     account_id: str | None = None,
@@ -1491,9 +2013,9 @@ def search_calls_by_number(
         )
     if len(digits) > 10:
         digits = digits[-10:]
-    # require_window=True: without a window we'd paginate all-time
-    # call history just to filter for a phone match, which is hugely
-    # wasteful (the user almost certainly wants recent calls).
+    # require_window=True: without a window CallRail would silently apply
+    # its default 7-day range, which is not what a caller omitting `days`
+    # expects from a search.
     ok, msg = _validate_window(days, None, None, require_window=True)
     if not ok:
         return _err_msg(msg)
@@ -1504,6 +2026,11 @@ def search_calls_by_number(
             "fields": "source,source_name,customer_phone_number,customer_name,answered,duration,first_call",
         }
         params.update(_date_window(days, None, None))
+        # CallRail's `search` matches any fragment of customer_number
+        # (live-verified 2026-10-05), so one page usually replaces a 50-page
+        # scan. The exact suffix match below still decides what is returned,
+        # because `search` also matches names, notes and the business number.
+        params["search"] = digits
         if company_id:
             params["company_id"] = company_id
 
@@ -1547,7 +2074,7 @@ def search_calls_by_number(
 
 # ---- Write tools (v0.2) ----
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_call(
     call_id: str,
     account_id: str | None = None,
@@ -1565,11 +2092,14 @@ def update_call(
         note: Replace the call's note text.
         tags: REPLACE the call's tag list with this set of tag names.
               (Use `add_call_tags`/`remove_call_tags` for additive changes.)
-        spam: True to mark as spam, False to unmark. Note: spam-flagged calls
+        spam: True to mark as spam. False is rejected: CallRail cannot
+            un-mark spam via the API. Note: spam-flagged calls
               are HIDDEN from default GET endpoints; re-reads will 404. Tag
               the call BEFORE flagging spam if you need both.
         customer_name: Override the auto-detected caller name.
-        lead_status: e.g. 'good_lead', 'not_a_lead', 'unknown'.
+        lead_status: 'good_lead' or 'not_a_lead'. CallRail returns 400 when
+            a call already at previously_marked_good_lead is set to
+            good_lead.
 
     Note: `value` is intentionally NOT exposed here. CallRail's API returns
     a 500 server error when `value` is included in the PUT body to /calls
@@ -1613,6 +2143,15 @@ def update_call(
         return _err_msg(
             f"tags list length {len(tags)} exceeds max {_MAX_TAGS_PER_REQUEST}."
         )
+    if spam is False:
+        return _err_msg(
+            "spam=False is not supported: CallRail does not allow un-marking "
+            "spam via the API. Clear it in the CallRail UI instead."
+        )
+    if lead_status is not None:
+        ok, msg = _validate_choice(lead_status, "lead_status", VALID_LEAD_STATUS_WRITES)
+        if not ok:
+            return _err_msg(msg)
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
@@ -1665,7 +2204,7 @@ def _clean_tag_list(tags: list[str] | None) -> list[str]:
     return list(seen.keys())
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
     """Append tags to a call WITHOUT replacing existing ones.
 
@@ -1708,7 +2247,7 @@ def add_call_tags(call_id: str, tags: list[str], account_id: str | None = None) 
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = None) -> str:
     """Remove specific tags from a call (case-sensitive on tag name).
 
@@ -1735,7 +2274,7 @@ def remove_call_tags(call_id: str, tags: list[str], account_id: str | None = Non
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_form_submission(
     submission_id: str,
     account_id: str | None = None,
@@ -1744,13 +2283,26 @@ def update_form_submission(
     value: float | None = None,
     spam: bool | None = None,
     lead_status: str | None = None,
+    append_tags: bool = False,
 ) -> str:
-    """Update an existing form submission: notes, tags, value, spam, lead status.
+    """Update an existing form submission: note, tags, value, lead status.
 
     Args:
         submission_id: CallRail form-submission id (prefix 'FOR...').
         account_id: Auto-resolves if omitted.
-        note, tags, value, spam, lead_status: same semantics as `update_call`.
+        note: Free text (max 4000 chars).
+        tags: Tag names. REPLACES the submission's tags unless
+            `append_tags=True` (CallRail's documented flag). Unknown names
+            are auto-created at the company level.
+        value: Monetary value; sent as a currency string ("12.50"), which
+            is what PUT /form_submissions accepts.
+        spam: NOT supported for form submissions (the PUT body has no spam
+            field); passing it returns an error. Spam flagging exists for
+            calls only (`update_call`).
+        lead_status: 'good_lead' or 'not_a_lead'. CallRail returns 400 when
+            a submission already at previously_marked_good_lead is set to
+            good_lead.
+        append_tags: Add `tags` to the existing ones instead of replacing.
 
     Empty-string fields (e.g. `note=""`) are rejected to prevent accidental
     field-clearing. See `update_call` docstring.
@@ -1784,15 +2336,26 @@ def update_form_submission(
         ok, msg = _validate_finite(value, "value")
         if not ok:
             return _err_msg(msg)
+    if spam is not None:
+        return _err_msg(
+            "spam is not an updatable field on form submissions: PUT /form_submissions "
+            "accepts tags, note, value, lead_status and append_tags only (CallRail docs). "
+            "Spam flagging exists for calls only (update_call)."
+        )
+    if lead_status is not None:
+        ok, msg = _validate_choice(lead_status, "lead_status", VALID_LEAD_STATUS_WRITES)
+        if not ok:
+            return _err_msg(msg)
     body: dict[str, Any] = {}
     if note is not None:
         body["note"] = note
     if tags is not None:
         body["tags"] = tags
+        if append_tags:
+            body["append_tags"] = True
     if value is not None:
-        body["value"] = value
-    if spam is not None:
-        body["spam"] = spam
+        # Documented type is string ("$1.00" and "1.00" are both accepted).
+        body["value"] = f"{value:.2f}"
     if lead_status is not None:
         body["lead_status"] = lead_status
     if not body:
@@ -1801,17 +2364,36 @@ def update_form_submission(
         aid = client.resolve_account_id(account_id)
         return _ok(client.put(f"a/{aid}/form_submissions/{submission_id}.json", body))
     except CallRailError as e:
-        return _err(e)
+        return _form_submission_err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_tags(
     account_id: str | None = None,
     company_id: str | None = None,
     per_page: int = 250,
     page: int = 1,
+    status: str | None = None,
+    tag_level: str | None = None,
 ) -> str:
-    """List all tags in the account, or filtered to one company."""
+    """List all tags in the account, or filtered to one company.
+
+    `status` ('enabled' | 'disabled') and `tag_level` ('account' |
+    'company') filter server-side.
+    """
+    if status is not None:
+        ok, msg = _validate_choice(status, "status", VALID_TAG_STATUSES)
+        if not ok:
+            return _err_msg(msg)
+    if tag_level is not None:
+        ok, msg = _validate_choice(tag_level, "tag_level", VALID_TAG_LEVELS)
+        if not ok:
+            return _err_msg(msg)
+    if tag_level == "account" and company_id:
+        return _err_msg(
+            "CallRail rejects tag_level='account' combined with company_id (account-level "
+            "tags belong to no company); drop one of the two filters."
+        )
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {
@@ -1820,28 +2402,37 @@ def list_tags(
         }
         if company_id:
             params["company_id"] = company_id
+        if status:
+            params["status"] = status
+        if tag_level:
+            params["tag_level"] = tag_level
         return _ok(client.get(f"a/{aid}/tags.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_CREATE)
 def create_tag(
     name: str,
-    company_id: str,
+    company_id: str | None = None,
     account_id: str | None = None,
     color: str | None = None,
+    tag_level: str | None = None,
 ) -> str:
-    """Create a new tag scoped to one company.
+    """Create a new tag, scoped to one company or to the whole account.
 
     Args:
         name: Tag display name.
-        company_id: Required (tags are per-company in CallRail).
+        company_id: 'COM...' id. Required for company-level tags (the
+            default). Omit it when `tag_level='account'`.
         account_id: Auto-resolves if omitted.
         color: One of the 24 CallRail-supported colors (see
             VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
             pink1-4, red1-2, orange1-4, yellow1-2, green1-4.
             If omitted, CallRail defaults to 'gray1'.
+        tag_level: 'company' (default) or 'account'. Account-level tags
+            apply to every company and can only be created by
+            administrators.
     """
     # Fail fast pre-network (project convention: validate before burning
     # the resolve_account_id call). Previously create_tag('' , '') went
@@ -1852,19 +2443,33 @@ def create_tag(
     ok, msg = _validate_length(name, "name", _MAX_TRACKER_NAME_LEN)
     if not ok:
         return _err_msg(msg)
-    ok, msg = _require_non_empty(company_id, "company_id")
-    if not ok:
-        return _err_msg(msg)
-    ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
-    if not ok:
-        return _err_msg(msg)
+    if tag_level is not None:
+        ok, msg = _validate_choice(tag_level, "tag_level", VALID_TAG_LEVELS)
+        if not ok:
+            return _err_msg(msg)
+    if tag_level == "account":
+        if company_id is not None:
+            return _err_msg(
+                "Account-level tags apply to every company; omit company_id when "
+                "tag_level='account'."
+            )
+    else:
+        if not isinstance(company_id, str) or not company_id.strip():
+            return _err_msg("company_id is required for company-level tags (or pass tag_level='account').")
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
     if color is not None and color not in VALID_TAG_COLORS:
         return _err_msg(
             f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
         )
     try:
         aid = client.resolve_account_id(account_id)
-        body: dict[str, Any] = {"name": name, "company_id": company_id}
+        body: dict[str, Any] = {"name": name}
+        if company_id is not None:
+            body["company_id"] = company_id
+        if tag_level is not None:
+            body["tag_level"] = tag_level
         if color:
             body["color"] = color
         return _ok(client.post(f"a/{aid}/tags.json", body))
@@ -1872,19 +2477,22 @@ def create_tag(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_tag(
     tag_id: str,
     account_id: str | None = None,
     name: str | None = None,
     color: str | None = None,
+    disabled: bool | None = None,
 ) -> str:
-    """Rename or recolor a tag.
+    """Rename, recolor, disable or re-enable a tag.
 
     Args:
         tag_id: Numeric tag id.
         account_id: Auto-resolves if omitted.
-        name: New display name.
+        name: New display name (changes the tag everywhere it is applied).
+        disabled: True hides the tag from new interactions (existing
+            applications stay); False re-enables it.
         color: One of the 24 CallRail-supported colors (see
             VALID_TAG_COLORS): gray1-2, blue1-2, cyan1-2, purple1-2,
             pink1-4, red1-2, orange1-4, yellow1-2, green1-4.
@@ -1911,13 +2519,18 @@ def update_tag(
         return _err_msg(
             f"Invalid color {color!r}. Must be one of: {', '.join(VALID_TAG_COLORS)}"
         )
+    if disabled is not None and not isinstance(disabled, bool):
+        return _err_msg("disabled must be true or false.")
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
     if color is not None:
         body["color"] = color
+    if disabled is not None:
+        # Documented as a string field taking "true" / "false".
+        body["disabled"] = "true" if disabled else "false"
     if not body:
-        return _err_msg("Supply name or color to update.")
+        return _err_msg("Supply name, color or disabled to update.")
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.put(f"a/{aid}/tags/{tag_id}.json", body))
@@ -1925,7 +2538,7 @@ def update_tag(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DELETE)
 def delete_tag(tag_id: str, account_id: str | None = None) -> str:
     """Delete a tag definition from the account. Removes it from any
     calls or form submissions that had it applied.
@@ -2015,7 +2628,7 @@ def _is_toll_free(number: str | None) -> bool:
     return False
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def usage_summary(
     account_id: str | None = None,
     days: int = 30,
@@ -2058,8 +2671,8 @@ def usage_summary(
     remainder rounding.
     """
     # require_window=True rejects days<=0 with no start_date; without it
-    # _date_window returns {} and we'd aggregate all-time call history,
-    # blowing up the minute total and over-estimating cost wildly.
+    # _date_window returns {} and CallRail would apply its default 7-day
+    # range, so the minute total would describe a window nobody asked for.
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
@@ -2112,14 +2725,19 @@ def usage_summary(
                     )
                 )
                 for t in trackers:
-                    for num in t.get("tracking_numbers") or []:
+                    nums = t.get("tracking_numbers")
+                    for num in (nums if isinstance(nums, list) else []):
+                        if not isinstance(num, str):
+                            continue
                         if _is_toll_free(num):
                             toll_free_numbers += 1
                         else:
                             local_numbers += 1
                 # Calls + minutes in window (paginated). Critical: without
                 # this, big clients silently truncate at 250 calls.
-                call_params: dict[str, Any] = {"company_id": cid, "per_page": 250, **date_params}
+                call_params: dict[str, Any] = {
+                    "company_id": cid, "per_page": 250, "time_zone": account_tz, **date_params,
+                }
                 scan: dict[str, Any] = {}
                 for call in client.paginate(
                     f"a/{aid}/calls.json", call_params, items_key="calls", stats=scan,
@@ -2130,7 +2748,7 @@ def usage_summary(
                     raw_duration = call.get("duration") or 0
                     try:
                         total_seconds += int(float(raw_duration))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         # Log + skip: surfaces malformed data without
                         # crashing the report.
                         logger.warning(
@@ -2317,7 +2935,7 @@ def usage_summary(
 GOOGLE_ADS_DEFAULT_MIN_CALL_DURATION_SECONDS = 60
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def call_eligibility_check(
     call_id: str,
     google_ads_min_duration_seconds: int = GOOGLE_ADS_DEFAULT_MIN_CALL_DURATION_SECONDS,
@@ -2398,7 +3016,7 @@ def call_eligibility_check(
         raw_duration = call_data.get("duration") or 0
         try:
             duration = int(float(raw_duration))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             duration = 0
         # `answered` may arrive as bool, "true"/"false" string, or int.
         raw_answered = call_data.get("answered")
@@ -2406,6 +3024,10 @@ def call_eligibility_check(
             answered = raw_answered.strip().lower() in ("true", "yes", "1")
         else:
             answered = bool(raw_answered)
+        # CallRail counts voicemail as missed in every filter and report and
+        # typically uploads only answered calls, so voicemail must not pass.
+        voicemail = bool(call_data.get("voicemail"))
+        answered = answered and not voicemail
 
         # Heuristic: Google source = utm_source=google (GMB + paid) OR
         # CallRail internal `source` slug starts with 'google_' (e.g.
@@ -2449,6 +3071,9 @@ def call_eligibility_check(
             )
         if not checks["answered"]:
             reasons.append(
+                "Call reached voicemail, which CallRail counts as missed. "
+                "CallRail typically only uploads answered calls."
+                if voicemail else
                 "Call was not answered. CallRail typically only uploads "
                 "answered calls."
             )
@@ -2501,7 +3126,7 @@ def call_eligibility_check(
 # v0.5.0: agency workflow tools (period comparison, bulk update, spam)
 # ============================================================
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def compare_periods(
     days: int = 30,
     account_id: str | None = None,
@@ -2577,6 +3202,8 @@ def compare_periods(
         prev_start = prev_end - timedelta(days=days)
 
         partial_failures: list[dict[str, Any]] = []
+        failed_ids: set[str] = set()
+        truncated_ids: set[str] = set()
 
         def _aggregate(
             window_start: str, window_end: str, window_label: str,
@@ -2597,18 +3224,21 @@ def compare_periods(
                     "start_date": window_start,
                     "end_date": window_end,
                     "fields": "duration",
+                    "time_zone": account_tz,
                 }
                 total_seconds = 0
                 call_count = 0
+                scan: dict[str, Any] = {}
                 try:
                     for call in client.paginate(
-                        f"a/{aid}/calls.json", params, items_key="calls"
+                        f"a/{aid}/calls.json", params, items_key="calls", stats=scan,
                     ):
                         call_count += 1
                         raw_duration = call.get("duration") or 0
-                        with contextlib.suppress(TypeError, ValueError):
+                        with contextlib.suppress(TypeError, ValueError, OverflowError):
                             total_seconds += int(float(raw_duration))
                 except CallRailError as e:
+                    failed_ids.add(cid)
                     partial_failures.append({
                         "company_id": cid,
                         "company_name": c.get("name", "(unnamed)"),
@@ -2627,6 +3257,8 @@ def compare_periods(
                     # traffic changes. usage_summary already excludes failed
                     # companies; match that so the two tools agree.
                     continue
+                if scan.get("truncated"):
+                    truncated_ids.add(cid)
                 agg_by_company[cid] = {
                     "name": c.get("name", "(unnamed)"),
                     "minutes": round(total_seconds / 60.0, 1),
@@ -2640,6 +3272,16 @@ def compare_periods(
 
         cur = _aggregate(cur_start.isoformat(), cur_end.isoformat(), "current")
         prev = _aggregate(prev_start.isoformat(), prev_end.isoformat(), "previous")
+
+        # A company that failed in EITHER window is dropped from BOTH.
+        # Dropping it from one side only turned a single 502 into a fake
+        # traffic change (and a fake biggest_mover).
+        excluded = sorted(failed_ids)
+        for agg in (cur, prev):
+            for cid in excluded:
+                agg["by_company"].pop(cid, None)
+            agg["total_minutes"] = round(sum(r["minutes"] for r in agg["by_company"].values()), 1)
+            agg["total_calls"] = sum(r["calls"] for r in agg["by_company"].values())
 
         def _pct(now: float, then: float) -> float | None:
             if then == 0:
@@ -2698,6 +3340,13 @@ def compare_periods(
                 if company_deltas else None
             ),
             "partial_failures": partial_failures,
+            "excluded_companies": excluded,
+            "scan_truncated_companies": sorted(truncated_ids),
+            "scan_note": (
+                "Some companies exceeded the pagination cap in at least one "
+                "window; their minutes and calls are UNDERSTATED. Narrow the "
+                "window or use call_stats for server-side totals."
+            ) if truncated_ids else None,
         })
     except CallRailError as e:
         return _err(e)
@@ -2712,7 +3361,7 @@ _BULK_UPDATE_CAP = 500
 _SPAM_AUTO_TAG_CAP = 1000
 
 
-@mcp.tool()
+@mcp.tool(annotations=_BULK_WRITE)
 def bulk_update_calls(
     company_id: str | None = None,
     days: int = 7,
@@ -2742,7 +3391,7 @@ def bulk_update_calls(
         company_id, days: filter (same semantics as `list_calls`). At least
             one filter must be provided to avoid "update everything ever".
         answer_status: server-side filter. One of 'answered', 'missed', or
-            'voicemail'.
+            'voicemail'. 'missed' includes calls that reached voicemail.
         answered: DEPRECATED alias ('true' -> answered, 'false' -> missed).
             Before v1.2.0 this was forwarded as an `answered` query param
             that CallRail does not implement: the filter was silently
@@ -2846,7 +3495,10 @@ def bulk_update_calls(
         # "there are more" to the caller (silent truncation risk).
         truncated_at_cap = False
         want_source = source.strip().lower() if source else None
-        for call in client.paginate(f"a/{aid}/calls.json", params, items_key="calls"):
+        scan: dict[str, Any] = {}
+        for call in client.paginate(
+            f"a/{aid}/calls.json", params, items_key="calls", stats=scan,
+        ):
             if want_source is not None:
                 # CallRail has no server-side source filter. Before v1.2.0
                 # `source` was forwarded as a query param and ignored, so a
@@ -2866,6 +3518,7 @@ def bulk_update_calls(
                 "matched": len(matched),
                 "cap": _BULK_UPDATE_CAP,
                 "truncated_at_cap": truncated_at_cap,
+                "scan_truncated": bool(scan.get("truncated")),
                 "hint": (
                     f"Filter matched >= {_BULK_UPDATE_CAP} calls; additional "
                     f"matches were NOT loaded. Narrow the filter or run "
@@ -2877,6 +3530,7 @@ def bulk_update_calls(
                         "source": c.get("source"),
                         "duration": c.get("duration"),
                         "answered": c.get("answered"),
+                        "voicemail": c.get("voicemail"),
                         "customer_name": c.get("customer_name"),
                         "current_tags": _tag_names_from(c.get("tags")),
                     }
@@ -2945,6 +3599,7 @@ def bulk_update_calls(
             "failed_count": len(failures),
             "failures": failures,
             "truncated_at_cap": truncated_at_cap,
+                "scan_truncated": bool(scan.get("truncated")),
             "hint": (
                 f"Filter matched >= {_BULK_UPDATE_CAP} calls; only the "
                 f"first {_BULK_UPDATE_CAP} were updated. Additional "
@@ -2955,7 +3610,7 @@ def bulk_update_calls(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def spam_detector(
     company_id: str | None = None,
     days: int = 30,
@@ -2994,8 +3649,8 @@ def spam_detector(
           dialer hammering you)
         - if auto_tag: count tagged + failures
     """
-    # require_window=True: without it, days=0/None falls back to all-time
-    # scan, then auto-tagging would touch every spam-looking call ever.
+    # require_window=True: without it, days=0/None falls back to CallRail's
+    # default 7-day range, and auto-tagging would act on an implicit window.
     ok, msg = _validate_window(days, None, None, require_window=True)
     if not ok:
         return _err_msg(msg)
@@ -3026,12 +3681,16 @@ def spam_detector(
         }
         if company_id:
             params["company_id"] = company_id
-        all_calls = list(client.paginate(f"a/{aid}/calls.json", params, items_key="calls"))
+        scan: dict[str, Any] = {}
+        all_calls = list(client.paginate(
+            f"a/{aid}/calls.json", params, items_key="calls", stats=scan,
+        ))
 
         # Caller frequency (from-number → count).
         caller_counts: dict[str, int] = {}
         for c in all_calls:
-            num = c.get("customer_phone_number") or ""
+            num = c.get("customer_phone_number")
+            num = num if isinstance(num, str) else ""
             if num:
                 caller_counts[num] = caller_counts.get(num, 0) + 1
 
@@ -3040,11 +3699,13 @@ def spam_detector(
         for c in all_calls:
             try:
                 duration = int(float(c.get("duration") or 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 duration = 0
-            answered = bool(c.get("answered"))
+            answered = _human_answered(c)
+            voicemail = bool(c.get("voicemail"))
             first_call = bool(c.get("first_call"))
-            num = c.get("customer_phone_number") or ""
+            num = c.get("customer_phone_number")
+            num = num if isinstance(num, str) else ""
             score = 0
             reasons: list[str] = []
             if duration < 10:
@@ -3052,7 +3713,7 @@ def spam_detector(
                 reasons.append(f"very short ({duration}s)")
             if not answered:
                 score += 1
-                reasons.append("not answered")
+                reasons.append("went to voicemail" if voicemail else "not answered")
             if first_call and duration < 30:
                 score += 1
                 reasons.append("first-time short call")
@@ -3065,6 +3726,7 @@ def spam_detector(
                 "reasons": reasons,
                 "duration": duration,
                 "answered": answered,
+                "voicemail": voicemail,
                 "customer_phone_number": num,
                 "customer_name": c.get("customer_name"),
                 "source": c.get("source"),
@@ -3092,6 +3754,8 @@ def spam_detector(
 
         result: dict[str, Any] = {
             "scanned_calls": len(all_calls),
+            "scan_truncated": bool(scan.get("truncated")),
+            "scan_total_records": scan.get("total_records"),
             "likely_spam_count": likely_spam_total,
             "likely_spam_returned": len(likely_spam),
             "likely_spam_truncated": likely_spam_truncated,
@@ -3105,6 +3769,7 @@ def spam_detector(
             if not ok:
                 return _err_msg(msg)
             tagged = 0
+            already_tagged = 0
             failures: list[dict[str, Any]] = []
             tag_target = all_likely_spam[:_SPAM_AUTO_TAG_CAP]
             tag_truncated_at_cap = len(all_likely_spam) > _SPAM_AUTO_TAG_CAP
@@ -3124,7 +3789,9 @@ def spam_detector(
                     if tag_name not in existing_names:
                         merged = list(dict.fromkeys(existing_names + [tag_name]))
                         client.put(f"a/{aid}/calls/{cid}.json", {"tags": merged})
-                    tagged += 1
+                        tagged += 1
+                    else:
+                        already_tagged += 1
                 except CallRailError as e:
                     failures.append({"call_id": cid, "error": str(e), "status": e.status})
                 except Exception as e:
@@ -3137,6 +3804,7 @@ def spam_detector(
                     })
             result["tag_name_used"] = tag_name
             result["tagged_count"] = tagged
+            result["already_tagged_count"] = already_tagged
             result["tag_attempted_count"] = len(tag_target)
             result["tag_truncated_at_cap"] = tag_truncated_at_cap
             result["tag_cap"] = _SPAM_AUTO_TAG_CAP if tag_truncated_at_cap else None
@@ -3157,7 +3825,7 @@ def spam_detector(
 # these role values. CallRail also has 'manager' / 'analyst' on some
 # plans; rejecting unknown values would be too strict. Pass through
 # but document the common ones.
-VALID_USER_ROLES: tuple[str, ...] = ("admin", "manager", "reporting", "analyst")
+VALID_USER_ROLES: tuple[str, ...] = ("admin", "manager", "reporting")
 
 # CallRail's actual user-name field limit isn't documented; 100 chars
 # is generous and prevents 10KB POST bodies on accidental input.
@@ -3180,13 +3848,17 @@ def _validate_email(value: str, field_name: str = "email") -> tuple[bool, str]:
     return True, ""
 
 
-@mcp.tool()
-def get_company(company_id: str, account_id: str | None = None) -> str:
+@mcp.tool(annotations=_READ)
+def get_company(
+    company_id: str, account_id: str | None = None, fields: str | None = None,
+) -> str:
     """Get full detail for one company.
 
     Args:
         company_id: 'COM...' id.
         account_id: Auto-resolves if omitted.
+        fields: Optional attributes (comma-separated), for example
+            'verified_caller_ids'.
 
     Note: Returns the disabled record (with `status: "disabled"`,
     `disabled_at` timestamp) for soft-deleted companies, NOT 404.
@@ -3200,12 +3872,36 @@ def get_company(company_id: str, account_id: str | None = None) -> str:
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/companies/{company_id}.json"))
+        return _ok(client.get(
+            f"a/{aid}/companies/{company_id}.json", {"fields": fields} if fields else {},
+        ))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+_LEAD_SCORING_NOT_SETTABLE = (
+    "lead_scoring_enabled is read-only in CallRail's API: it appears in company "
+    "responses but neither POST nor PUT /companies accepts it. Toggle manual lead "
+    "scoring in the CallRail UI instead."
+)
+
+
+def _deprecated_company_toggle_warnings(
+    swap_exclude_jquery: bool | None, keyword_spotting_enabled: bool | None,
+) -> list[str]:
+    """Both fields are documented as deprecated no-ops, so they are never sent."""
+    notes: list[str] = []
+    for key, val in (
+        ("swap_exclude_jquery", swap_exclude_jquery),
+        ("keyword_spotting_enabled", keyword_spotting_enabled),
+    ):
+        if val is not None:
+            logger.warning("%s is deprecated by CallRail and has no effect; not sent.", key)
+            notes.append(f"{key} is deprecated by CallRail and has no effect, so it was not sent.")
+    return notes
+
+
+@mcp.tool(annotations=_CREATE)
 def create_company(
     name: str,
     time_zone: str = "America/New_York",
@@ -3223,20 +3919,29 @@ def create_company(
     company: creating a company is free; provisioning trackers under
     it is what costs money (see `create_tracker`).
 
+    CallRail's POST /companies accepts only `name` and `time_zone`. Every
+    feature toggle is a PUT field, so when any toggle is given this tool
+    creates the company and then applies the toggles with a second call;
+    the response carries `settings_applied` (or `settings_not_applied`
+    plus `api_warnings` if that second call failed).
+
     Args:
         name: Display name (e.g. "Smith & Co Roofing"). Required.
         time_zone: IANA TZ. Default 'America/New_York' (matches your
             existing companies). Common: 'America/Los_Angeles',
             'America/Chicago', 'America/Denver'.
-        callscore_enabled: CallRail CallScore™ AI scoring (paid feature).
-            Pass None (default) to inherit account-level default.
-        lead_scoring_enabled: Manual lead-status workflow. None=inherit.
-        swap_exclude_jquery: Skip jQuery-driven phone swaps. None=inherit.
+        callscore_enabled: CallRail CallScore AI scoring (paid feature).
+            Pass None (default) to inherit the account default.
+        lead_scoring_enabled: NOT settable via the API (read-only field);
+            passing it returns an error. Toggle it in the CallRail UI.
+        swap_exclude_jquery: Deprecated by CallRail, has no effect. Not
+            sent; reported under `api_warnings`.
         callscribe_enabled: Conversation Intelligence transcripts (paid).
             None=inherit.
-        keyword_spotting_enabled: Real-time keyword detection in calls.
-            None=inherit.
-        form_capture: Enable CallRail Form Tracking. None=inherit.
+        keyword_spotting_enabled: Deprecated by CallRail, has no effect.
+            Not sent; reported under `api_warnings`.
+        form_capture: Enable CallRail Form Tracking (sent as the PUT field
+            `external_form_capture`). None=inherit.
         account_id: Auto-resolves if omitted.
 
     Note: Optional booleans default to None (inherit account-level
@@ -3253,26 +3958,49 @@ def create_company(
     ok, msg = _require_non_empty(time_zone, "time_zone")
     if not ok:
         return _err_msg(msg)
-    body: dict[str, Any] = {"name": name, "time_zone": time_zone}
-    # Only include optional toggles when the caller explicitly set them.
+    if lead_scoring_enabled is not None:
+        return _err_msg(_LEAD_SCORING_NOT_SETTABLE)
+    warnings = _deprecated_company_toggle_warnings(swap_exclude_jquery, keyword_spotting_enabled)
+    # POST /companies accepts only name and time_zone (documented); every
+    # feature toggle is a PUT field, so they are applied in a second call.
+    # Only toggles the caller explicitly set are sent.
+    settings: dict[str, Any] = {}
     for key, val in (
         ("callscore_enabled", callscore_enabled),
-        ("lead_scoring_enabled", lead_scoring_enabled),
-        ("swap_exclude_jquery", swap_exclude_jquery),
         ("callscribe_enabled", callscribe_enabled),
-        ("keyword_spotting_enabled", keyword_spotting_enabled),
-        ("form_capture", form_capture),
+        ("external_form_capture", form_capture),
     ):
         if val is not None:
-            body[key] = val
+            settings[key] = val
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.post(f"a/{aid}/companies.json", body))
+        created = client.post(f"a/{aid}/companies.json", {"name": name, "time_zone": time_zone})
     except CallRailError as e:
         return _err(e)
+    if settings:
+        cid = created.get("id")
+        if isinstance(cid, str) and cid:
+            try:
+                created = client.put(f"a/{aid}/companies/{cid}.json", settings)
+                created["settings_applied"] = settings
+            except CallRailError as e:
+                created["settings_not_applied"] = settings
+                warnings.append(
+                    f"The company was created but applying its feature toggles failed "
+                    f"({e}). Retry with update_company(company_id={cid!r}, ...)."
+                )
+        else:
+            created["settings_not_applied"] = settings
+            warnings.append(
+                "CallRail did not return a company id, so the feature toggles were not "
+                "applied; use update_company once the id is known."
+            )
+    if warnings:
+        created["api_warnings"] = warnings
+    return _ok(created)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_company(
     company_id: str,
     name: str | None = None,
@@ -3284,6 +4012,10 @@ def update_company(
     keyword_spotting_enabled: bool | None = None,
     form_capture: bool | None = None,
     account_id: str | None = None,
+    swap_ppc_override: bool | None = None,
+    swap_landing_override: str | None = None,
+    swap_cookie_duration: int | None = None,
+    swap_cookie_duration_unit: str | None = None,
 ) -> str:
     """Update mutable settings on a company. Pass None to leave a field
     unchanged; only fields with explicit values are sent in the PUT
@@ -3303,21 +4035,30 @@ def update_company(
         company_id: 'COM...' id.
         name: New display name. Empty string rejected. Max 255 chars.
         time_zone: IANA tz string (e.g. 'America/New_York').
-        callscore_enabled: Lead-scoring AI feature. PAID add-on.
-        lead_scoring_enabled: Older lead-scoring system.
-        swap_exclude_jquery: Skip jQuery initialization in DNI script.
+        callscore_enabled: CallScore AI lead scoring. PAID add-on.
+        lead_scoring_enabled: NOT settable via the API (read-only field);
+            passing it returns an error. Toggle it in the CallRail UI.
+        swap_exclude_jquery: Deprecated by CallRail, has no effect. Not
+            sent; reported under `api_warnings` in the response.
         callscribe_enabled: Conversation Intelligence (transcripts +
-            keyword spotting). PAID feature.
-        keyword_spotting_enabled: DEPRECATED by CallRail. Accepted for
-            compatibility but has no effect.
-        swap_exclude_jquery: DEPRECATED by CallRail (the DNI script no
-            longer needs jQuery). Accepted but has no effect.
+            call highlights). PAID feature.
+        keyword_spotting_enabled: Deprecated by CallRail, has no effect.
+            Not sent; reported under `api_warnings` in the response.
         form_capture: Enable CallRail Form Tracking on this company.
             Sent as CallRail's `external_form_capture` PUT field.
+        swap_ppc_override: Override the original source when a visitor
+            arrives via PPC.
+        swap_landing_override: Landing-page URL parameter (for example
+            'utm_source') that overrides the original source. Pass "" to
+            turn the override off (sent as null).
+        swap_cookie_duration: Visitor cookie lifetime, with
+            `swap_cookie_duration_unit` ('months' | 'weeks' | 'days').
+            CallRail caps it at 6 months.
         account_id: CallRail account ID. Auto-resolves if omitted.
 
     Returns:
-        JSON string with the updated company object.
+        JSON string with the updated company object, plus `api_warnings`
+        when a deprecated no-op field was dropped.
     """
     ok, msg = _require_non_empty(company_id, "company_id")
     if not ok:
@@ -3336,31 +4077,66 @@ def update_company(
         ok, msg = _require_non_empty(time_zone, "time_zone")
         if not ok:
             return _err_msg(msg)
+    if lead_scoring_enabled is not None:
+        return _err_msg(_LEAD_SCORING_NOT_SETTABLE)
+    if swap_ppc_override is not None and not isinstance(swap_ppc_override, bool):
+        return _err_msg("swap_ppc_override must be true or false.")
+    if swap_landing_override is not None and not isinstance(swap_landing_override, str):
+        return _err_msg("swap_landing_override must be a URL parameter name such as 'utm_source' (or \"\" to disable).")
+    if swap_cookie_duration is not None and (
+        isinstance(swap_cookie_duration, bool)
+        or not isinstance(swap_cookie_duration, int)
+        or swap_cookie_duration <= 0
+    ):
+        return _err_msg("swap_cookie_duration must be a positive integer.")
+    if swap_cookie_duration_unit is not None:
+        ok, msg = _validate_choice(
+            swap_cookie_duration_unit, "swap_cookie_duration_unit", VALID_COOKIE_DURATION_UNITS,
+        )
+        if not ok:
+            return _err_msg(msg)
+    if swap_cookie_duration is not None and swap_cookie_duration_unit is not None:
+        cap = {"months": 6, "weeks": 26, "days": 183}[swap_cookie_duration_unit]
+        if swap_cookie_duration > cap:
+            return _err_msg(
+                f"swap_cookie_duration may not exceed 6 months "
+                f"({cap} {swap_cookie_duration_unit}); CallRail rejects longer lifetimes."
+            )
+    warnings = _deprecated_company_toggle_warnings(swap_exclude_jquery, keyword_spotting_enabled)
     body: dict[str, Any] = {}
     for key, val in (
         ("name", name),
         ("time_zone", time_zone),
         ("callscore_enabled", callscore_enabled),
-        ("lead_scoring_enabled", lead_scoring_enabled),
-        ("swap_exclude_jquery", swap_exclude_jquery),
         ("callscribe_enabled", callscribe_enabled),
-        ("keyword_spotting_enabled", keyword_spotting_enabled),
         # The PUT field is `external_form_capture`; `form_capture` appears
         # only in RESPONSE bodies, so sending it was a silent no-op.
         ("external_form_capture", form_capture),
+        ("swap_ppc_override", swap_ppc_override),
+        ("swap_cookie_duration", swap_cookie_duration),
+        ("swap_cookie_duration_unit", swap_cookie_duration_unit),
     ):
         if val is not None:
             body[key] = val
+    if swap_landing_override is not None:
+        # CallRail turns the override off when the field is null; an empty
+        # string from the caller means "disable".
+        body["swap_landing_override"] = swap_landing_override.strip() or None
     if not body:
+        if warnings:
+            return _err_msg("No effective fields supplied to update. " + " ".join(warnings))
         return _err_msg("No fields supplied to update.")
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.put(f"a/{aid}/companies/{company_id}.json", body))
+        updated = client.put(f"a/{aid}/companies/{company_id}.json", body)
     except CallRailError as e:
         return _err(e)
+    if warnings:
+        updated["api_warnings"] = warnings
+    return _ok(updated)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DELETE)
 def delete_company(company_id: str, account_id: str | None = None) -> str:
     """Soft-delete a company. Status flips to 'disabled', records retained.
 
@@ -3384,7 +4160,7 @@ def delete_company(company_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_user(user_id: str, account_id: str | None = None) -> str:
     """Get full detail for one user on the account.
 
@@ -3411,7 +4187,7 @@ def get_user(user_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_CREATE)
 def create_user(
     email: str,
     first_name: str,
@@ -3425,11 +4201,13 @@ def create_user(
     Args:
         email: Recipient email. CallRail sends an invite.
         first_name, last_name: Display name.
-        role: Default 'reporting' (read-only). Common values:
-            'admin', 'manager', 'reporting', 'analyst'. Other plan-specific
-            roles may exist; we don't reject unknown values, just warn.
+        role: Default 'reporting' (read-only). Documented values:
+            'admin', 'manager', 'reporting'. CallRail's docs also mention
+            legacy "notification" users, so unknown values are passed
+            through with a warning instead of rejected.
         company_ids: List of 'COM...' company IDs the user can access.
-            Empty/None = account-wide (admins typically).
+            REQUIRED by CallRail for manager and reporting roles (sent as
+            the documented `companies` field). Admins see every company.
         account_id: Auto-resolves if omitted.
 
     Note: This sends an invitation email. Don't run experimentally.
@@ -3492,7 +4270,7 @@ def create_user(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_user(
     user_id: str,
     email: str | None = None,
@@ -3502,12 +4280,24 @@ def update_user(
     company_ids: list[str] | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Update mutable user fields. Pass None to leave unchanged.
+    """Update a user's name or company access. Pass None to leave unchanged.
+
+    CallRail's PUT /users accepts first_name, last_name, email and
+    companies only, with two documented restrictions: names and email can
+    be changed only for the user who owns the API key, and an email change
+    requires that user's current password in the request. This server never
+    handles passwords, so `email` is rejected; `role` is rejected because the
+    API has no way to change it (recreate the user, or use the CallRail UI).
+    Updates are only accepted for users who have accepted their invitation.
 
     Args:
         user_id: 'USR...' id.
-        company_ids: REPLACES the user's company access list (additive
-            modification not exposed; for additive use the CallRail UI).
+        first_name, last_name: Only for the API key's own user.
+        email: Rejected (see above).
+        role: Rejected (see above).
+        company_ids: REPLACES the user's company access list (send the
+            full list the user should keep). Admin-only; applies to
+            manager and reporting users.
     """
     ok, msg = _require_non_empty(user_id, "user_id")
     if not ok:
@@ -3515,19 +4305,21 @@ def update_user(
     ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
     if not ok:
         return _err_msg(msg)
+    if role is not None:
+        return _err_msg(
+            "role cannot be changed through the API: PUT /users accepts first_name, "
+            "last_name, email and companies only (CallRail docs). Change the role in "
+            "the CallRail UI, or delete_user and create_user with the new role."
+        )
     if email is not None:
-        # Audit fix: empty/whitespace email needs the clearer "required"
-        # error before the email-format regex error.
-        ok, msg = _require_non_empty(email, "email")
-        if not ok:
-            return _err_msg(msg)
-        ok, msg = _validate_email(email)
-        if not ok:
-            return _err_msg(msg)
+        return _err_msg(
+            "Changing a user's email requires that user's current password in the "
+            "request (CallRail docs), which this server never handles. Change the "
+            "address in the CallRail UI instead."
+        )
     for value, field in (
         (first_name, "first_name"),
         (last_name, "last_name"),
-        (role, "role"),
     ):
         if value is not None:
             ok, msg = _require_non_empty(value, field)
@@ -3542,11 +4334,6 @@ def update_user(
         ok, msg = _validate_length(last_name, "last_name", _MAX_USER_NAME_LEN)
         if not ok:
             return _err_msg(msg)
-    if role is not None and role not in VALID_USER_ROLES:
-        logger.warning(
-            "update_user role=%r is not in known set %s; CallRail may reject.",
-            role, VALID_USER_ROLES,
-        )
     if company_ids is not None:
         if not isinstance(company_ids, list):
             return _err_msg(
@@ -3559,10 +4346,8 @@ def update_user(
                 return _err_msg(msg)
     body: dict[str, Any] = {}
     for key, val in (
-        ("email", email),
         ("first_name", first_name),
         ("last_name", last_name),
-        ("role", role),
         # Documented field name is `companies` (see create_user).
         ("companies", company_ids),
     ):
@@ -3577,7 +4362,7 @@ def update_user(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DELETE)
 def delete_user(user_id: str, account_id: str | None = None) -> str:
     """Remove a user from the account.
 
@@ -3601,7 +4386,7 @@ def delete_user(user_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_form_submission(submission_id: str, account_id: str | None = None) -> str:
     """Get full detail for one form submission, including all submitted
     field data.
@@ -3631,10 +4416,10 @@ def get_form_submission(submission_id: str, account_id: str | None = None) -> st
         aid = client.resolve_account_id(account_id)
         return _ok(client.get(f"a/{aid}/form_submissions/{submission_id}.json"))
     except CallRailError as e:
-        return _err(e)
+        return _form_submission_err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_text_message(conversation_id: str, account_id: str | None = None) -> str:
     """Get full detail for one SMS conversation, including all messages.
 
@@ -3677,18 +4462,19 @@ def get_text_message(conversation_id: str, account_id: str | None = None) -> str
 # Common alert types for notifications. Discovered via empirical POST
 # probing. The list is incomplete; CallRail likely supports more
 # (per-plan).
+# The documented enum. The previous values ("all_calls", "missed_calls", ...)
+# were UI labels; CallRail rejects them with "Alert type Invalid Call Type"
+# (live-verified 2026-10-05). Required only when call_enabled is true.
+VALID_NOTIFICATION_TYPES: tuple[str, ...] = ("push", "email", "desktop")
 VALID_NOTIFICATION_ALERT_TYPES: tuple[str, ...] = (
-    "all_calls",
-    "first_time_callers",
-    "all_texts",
-    "first_time_texters",
-    "missed_calls",
-    "voicemails",
-    "all_form_submissions",
+    "all",
+    "first_call",
+    "missed_and_vm",
+    "vm_only",
 )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_tag(tag_id: str, account_id: str | None = None) -> str:
     """Get full detail for one tag.
 
@@ -3713,12 +4499,13 @@ def get_tag(tag_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_integrations(
     company_id: str,
     per_page: int = 100,
     page: int = 1,
     account_id: str | None = None,
+    fields: str | None = None,
 ) -> str:
     """List integrations attached to one company (GMB, Google Ads,
     Facebook, Slack, Webhooks, etc.).
@@ -3729,6 +4516,9 @@ def list_integrations(
         per_page: Page size (max 250).
         page: 1-indexed.
         account_id: Auto-resolves if omitted.
+
+    `fields` (comma-separated) adds optional attributes to each
+    integration.
     """
     ok, msg = _require_non_empty(company_id, "company_id")
     if not ok:
@@ -3738,23 +4528,28 @@ def list_integrations(
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        params = {
+        params: dict[str, Any] = {
             "company_id": company_id,
             "per_page": _clamp_per_page(per_page),
             "page": _clamp_page(page),
         }
+        if fields:
+            params["fields"] = fields
         return _ok(client.get(f"a/{aid}/integrations.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
-def get_integration(integration_id: str, account_id: str | None = None) -> str:
+@mcp.tool(annotations=_READ)
+def get_integration(
+    integration_id: str, account_id: str | None = None, fields: str | None = None,
+) -> str:
     """Get full detail for one integration.
 
     Args:
         integration_id: Numeric integration id (from list_integrations).
         account_id: Auto-resolves if omitted.
+        fields: Optional attributes (comma-separated).
     """
     ok, msg = _require_non_empty(integration_id, "integration_id")
     if not ok:
@@ -3767,22 +4562,22 @@ def get_integration(integration_id: str, account_id: str | None = None) -> str:
         return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.get(f"a/{aid}/integrations/{integration_id}.json"))
+        return _ok(client.get(
+            f"a/{aid}/integrations/{integration_id}.json", {"fields": fields} if fields else {},
+        ))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_CREATE)
 def create_form_submission(
     company_id: str,
-    referrer: str,
-    referring_url: str,
-    landing_page_url: str,
-    form_url: str | None = None,
-    form_data: dict[str, Any] | None = None,
-    customer_phone_number: str | None = None,
-    customer_name: str | None = None,
-    customer_email: str | None = None,
+    form_url: str,
+    form_data: dict[str, Any],
+    referrer: str | None = None,
+    referring_url: str | None = None,
+    landing_page_url: str | None = None,
+    session_id: str | None = None,
     note: str | None = None,
     tags: list[str] | None = None,
     value: float | None = None,
@@ -3795,42 +4590,70 @@ def create_form_submission(
     (paper form, in-person, etc.) and want it visible in CallRail with
     proper attribution + lead-status workflow.
 
+    CallRail's POST /form_submissions accepts exactly: company_id,
+    form_url, form_data, and EITHER session_id OR all three of referrer /
+    referring_url / landing_page_url. It parses phone numbers out of
+    form_data to find or create the person, so put the customer's phone,
+    name and email inside form_data (there are no customer_* body fields).
+
     Args:
         company_id: 'COM...' id. Required.
-        referrer / referring_url / landing_page_url: All three required
-            (CallRail enforces "either session_id or all 3 of these").
-            Use the original web context if known, or "(direct)" /
-            "https://offline" placeholders for in-person leads.
-        form_url: URL of the form page if applicable.
-        form_data: Dict of form-field values (e.g.
-            `{"name": "Kevin", "email": "k@x.com", "phone": "412-555-1234"}`).
-        customer_phone_number / name / email: Set on the submission directly
-            (overrides form_data if both are set).
-        note, tags, value, lead_status: Standard lead-management fields.
+        form_url: URL of the page the form was submitted to. Required.
+        form_data: Dict of form-field values, e.g.
+            `{"name": "Kevin", "email": "k@x.com", "phone": "412-555-1234"}`.
+            Required and non-empty.
+        referrer / referring_url / landing_page_url: Attribution. All three
+            are required unless `session_id` is given. Use the original web
+            context if known, or "(direct)" / "https://offline" placeholders
+            for in-person leads.
+        session_id: 'SES...' id of an existing web session; replaces the
+            three attribution fields.
+        note, tags, value, lead_status: Lead-management fields. The POST
+            endpoint does not accept them, so they are applied with a
+            follow-up PUT; the response reports `lead_fields_applied` or
+            `lead_fields_not_applied` (plus `api_warnings`). `value` is
+            sent as a currency string ("12.50"); `lead_status` is
+            'good_lead' or 'not_a_lead'.
         account_id: Auto-resolves if omitted.
     """
-    for value_, field in (
-        (company_id, "company_id"),
-        (referrer, "referrer"),
-        (referring_url, "referring_url"),
-        (landing_page_url, "landing_page_url"),
-    ):
-        ok, msg = _require_non_empty(value_, field)
-        if not ok:
-            return _err_msg(msg)
+    ok, msg = _require_non_empty(company_id, "company_id")
+    if not ok:
+        return _err_msg(msg)
     ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
     if not ok:
         return _err_msg(msg)
+    ok, msg = _require_non_empty(form_url, "form_url")
+    if not ok:
+        return _err_msg(msg)
+    if not isinstance(form_data, dict) or not form_data:
+        return _err_msg(
+            "form_data must be a non-empty object of form field names to values "
+            "(put the customer's phone, name and email in here)."
+        )
+    if session_id is not None:
+        ok, msg = _require_non_empty(session_id, "session_id")
+        if not ok:
+            return _err_msg(msg)
+        ok, msg = _validate_id_shape(session_id, "session_id", prefix="SES")
+        if not ok:
+            return _err_msg(msg)
+    else:
+        missing = [
+            field
+            for field, val in (
+                ("referrer", referrer),
+                ("referring_url", referring_url),
+                ("landing_page_url", landing_page_url),
+            )
+            if not isinstance(val, str) or not val.strip()
+        ]
+        if missing:
+            return _err_msg(
+                f"Missing attribution: {', '.join(missing)}. Provide all three of "
+                f"referrer, referring_url and landing_page_url, or a session_id."
+            )
     if note is not None:
         ok, msg = _validate_length(note, "note", _MAX_NOTE_LEN)
-        if not ok:
-            return _err_msg(msg)
-    if customer_email is not None:
-        ok, msg = _validate_email(customer_email, "customer_email")
-        if not ok:
-            return _err_msg(msg)
-    if customer_phone_number is not None:
-        ok, msg = _validate_phone(customer_phone_number, "customer_phone_number")
         if not ok:
             return _err_msg(msg)
     if tags is not None and not isinstance(tags, list):
@@ -3843,34 +4666,54 @@ def create_form_submission(
         ok, msg = _validate_finite(value, "value")
         if not ok:
             return _err_msg(msg)
+    if lead_status is not None:
+        ok, msg = _validate_choice(lead_status, "lead_status", VALID_LEAD_STATUS_WRITES)
+        if not ok:
+            return _err_msg(msg)
 
-    body: dict[str, Any] = {
-        "company_id": company_id,
-        "referrer": referrer,
-        "referring_url": referring_url,
-        "landing_page_url": landing_page_url,
-    }
-    for key, val in (
-        ("form_url", form_url),
-        ("form_data", form_data),
-        ("customer_phone_number", customer_phone_number),
-        ("customer_name", customer_name),
-        ("customer_email", customer_email),
-        ("note", note),
-        ("tags", tags),
-        ("value", value),
-        ("lead_status", lead_status),
-    ):
-        if val is not None:
-            body[key] = val
+    body: dict[str, Any] = {"company_id": company_id, "form_url": form_url, "form_data": form_data}
+    if session_id is not None:
+        body["session_id"] = session_id
+    else:
+        body["referrer"] = referrer
+        body["referring_url"] = referring_url
+        body["landing_page_url"] = landing_page_url
+    lead_fields: dict[str, Any] = {}
+    if note is not None:
+        lead_fields["note"] = note
+    if tags is not None:
+        lead_fields["tags"] = tags
+    if value is not None:
+        lead_fields["value"] = f"{value:.2f}"
+    if lead_status is not None:
+        lead_fields["lead_status"] = lead_status
     try:
         aid = client.resolve_account_id(account_id)
-        return _ok(client.post(f"a/{aid}/form_submissions.json", body))
+        created = client.post(f"a/{aid}/form_submissions.json", body)
     except CallRailError as e:
-        return _err(e)
+        return _form_submission_err(e)
+    if lead_fields:
+        fid = created.get("id")
+        if isinstance(fid, str) and fid:
+            try:
+                created = client.put(f"a/{aid}/form_submissions/{fid}.json", lead_fields)
+                created["lead_fields_applied"] = lead_fields
+            except CallRailError as e:
+                created["lead_fields_not_applied"] = lead_fields
+                created["api_warnings"] = [
+                    f"The submission was created but the lead fields were not applied "
+                    f"({e}). Retry with update_form_submission(submission_id={fid!r}, ...)."
+                ]
+        else:
+            created["lead_fields_not_applied"] = lead_fields
+            created["api_warnings"] = [
+                "CallRail did not return a submission id, so the lead fields were not applied."
+            ]
+    return _ok(created)
 
 
-@mcp.tool()
+
+@mcp.tool(annotations=_DIAL)
 def create_outbound_call(
     caller_id: str,
     business_phone_number: str,
@@ -3880,6 +4723,7 @@ def create_outbound_call(
     outbound_greeting_text: str | None = None,
     outbound_greeting_recording_url: str | None = None,
     account_id: str | None = None,
+    agent_id: str | None = None,
 ) -> str:
     """Place an outbound call. THIS ACTUALLY DIALS REAL PHONES.
 
@@ -3908,6 +4752,7 @@ def create_outbound_call(
             customer.
         outbound_greeting_recording_url: Public URL of an audio greeting,
             used instead of `outbound_greeting_text`.
+        agent_id: 'USR...' id of the user to assign to the call.
         account_id: Auto-resolves if omitted.
 
     Returns: The call object CallRail creates (id, etc.).
@@ -3933,6 +4778,10 @@ def create_outbound_call(
         )
         if not ok:
             return _err_msg(msg)
+    if agent_id is not None:
+        ok, msg = _validate_id_shape(agent_id, "agent_id", prefix="USR")
+        if not ok:
+            return _err_msg(msg)
     if not confirm_dialing:
         return _err_msg(
             f"create_outbound_call requires confirm_dialing=True. This places "
@@ -3950,6 +4799,7 @@ def create_outbound_call(
         ("recording_enabled", recording_enabled),
         ("outbound_greeting_text", outbound_greeting_text),
         ("outbound_greeting_recording_url", outbound_greeting_recording_url),
+        ("agent_id", agent_id),
     ):
         if val is not None:
             body[key] = val
@@ -3960,11 +4810,10 @@ def create_outbound_call(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_CREATE)
 def create_notification(
-    name: str,
-    user_id: str,
-    alert_type: str,
+    alert_type: str | None = None,
+    user_id: str | None = None,
     company_id: str | None = None,
     tracker_id: str | None = None,
     send_email: bool = True,
@@ -3973,30 +4822,50 @@ def create_notification(
     call_enabled: bool | None = None,
     sms_enabled: bool | None = None,
     email: str | None = None,
+    agent_id: str | None = None,
+    name: str | None = None,
     account_id: str | None = None,
 ) -> str:
     """Create a notification rule (who gets pinged on which event).
 
     Args:
-        name: Display name for this rule.
-        user_id: 'USR...' id of the user being notified.
-        alert_type: Trigger event. Common values:
-            'all_calls', 'first_time_callers', 'missed_calls',
-            'voicemails', 'all_texts', 'first_time_texters',
-            'all_form_submissions'. Plan-specific types may exist.
+        alert_type: Which calls trigger the rule. One of 'all',
+            'first_call', 'missed_and_vm', 'vm_only'. Required when
+            call_enabled is true; omit for SMS-only rules.
+        user_id: 'USR...' id of the user being notified. If neither
+            user_id nor email is given, CallRail assigns the rule to the
+            user who owns the API key.
         company_id, tracker_id: Optional scope filters.
         send_email / send_desktop / send_push: Channel toggles.
-        call_enabled / sms_enabled: Trigger toggles for mixed-event rules.
-        email: Override email address (defaults to user's email).
+        call_enabled / sms_enabled: Trigger toggles; set call_enabled for
+            call alerts and sms_enabled for text alerts.
+        email: Creates an email-only recipient instead of a user. CallRail
+            requires a company_id or tracker_id with it and allows only
+            send_email.
+        agent_id: 'USR...' id of the agent whose calls trigger the rule.
+        name: Accepted for backward compatibility and NOT sent: CallRail
+            generates the name from the configuration.
         account_id: Auto-resolves if omitted.
     """
-    for value_, field in ((name, "name"), (user_id, "user_id"), (alert_type, "alert_type")):
-        ok, msg = _require_non_empty(value_, field)
+    if call_enabled and not alert_type:
+        return _err_msg("alert_type is required when call_enabled is true.")
+    if alert_type is not None:
+        ok, msg = _require_non_empty(alert_type, "alert_type")
         if not ok:
             return _err_msg(msg)
-    ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
-    if not ok:
-        return _err_msg(msg)
+    if user_id is not None:
+        ok, msg = _validate_id_shape(user_id, "user_id", prefix="USR")
+        if not ok:
+            return _err_msg(msg)
+    if agent_id is not None:
+        ok, msg = _validate_id_shape(agent_id, "agent_id", prefix="USR")
+        if not ok:
+            return _err_msg(msg)
+    if email is not None and not (company_id or tracker_id):
+        return _err_msg(
+            "email-only notifications need a company_id or tracker_id "
+            "(CallRail rule)."
+        )
     if company_id is not None:
         ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
         if not ok:
@@ -4009,22 +4878,21 @@ def create_notification(
         ok, msg = _validate_email(email)
         if not ok:
             return _err_msg(msg)
-    if alert_type not in VALID_NOTIFICATION_ALERT_TYPES:
+    if alert_type is not None and alert_type not in VALID_NOTIFICATION_ALERT_TYPES:
         logger.warning(
-            "create_notification alert_type=%r is not in known set %s; "
-            "CallRail may reject. Adjust VALID_NOTIFICATION_ALERT_TYPES "
-            "in server.py if your plan supports it.",
+            "create_notification alert_type=%r is not in the documented set "
+            "%s; CallRail is likely to reject it.",
             alert_type, VALID_NOTIFICATION_ALERT_TYPES,
         )
     body: dict[str, Any] = {
-        "name": name,
-        "user_id": user_id,
-        "alert_type": alert_type,
         "send_email": send_email,
         "send_desktop": send_desktop,
         "send_push": send_push,
     }
     for key, val in (
+        ("alert_type", alert_type),
+        ("user_id", user_id),
+        ("agent_id", agent_id),
         ("company_id", company_id),
         ("tracker_id", tracker_id),
         ("call_enabled", call_enabled),
@@ -4040,7 +4908,7 @@ def create_notification(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_notification(
     notification_id: str,
     name: str | None = None,
@@ -4051,6 +4919,8 @@ def update_notification(
     call_enabled: bool | None = None,
     sms_enabled: bool | None = None,
     email: str | None = None,
+    company_id: str | None = None,
+    tracker_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
     """Update a notification rule. Pass None to leave a field
@@ -4101,9 +4971,17 @@ def update_notification(
             return _err_msg(msg)
         if alert_type not in VALID_NOTIFICATION_ALERT_TYPES:
             logger.warning(
-                "update_notification alert_type=%r is not in known set %s.",
-                alert_type, VALID_NOTIFICATION_ALERT_TYPES,
+                "update_notification alert_type=%r is not in the documented "
+                "set %s.", alert_type, VALID_NOTIFICATION_ALERT_TYPES,
             )
+    if company_id is not None:
+        ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
+        if not ok:
+            return _err_msg(msg)
+    if tracker_id is not None:
+        ok, msg = _validate_id_shape(tracker_id, "tracker_id", prefix="TRK")
+        if not ok:
+            return _err_msg(msg)
     if email is not None:
         ok, msg = _require_non_empty(email, "email")
         if not ok:
@@ -4113,19 +4991,27 @@ def update_notification(
             return _err_msg(msg)
     body: dict[str, Any] = {}
     for key, val in (
-        ("name", name),
         ("alert_type", alert_type),
         ("send_email", send_email),
         ("send_desktop", send_desktop),
         ("send_push", send_push),
         ("call_enabled", call_enabled),
         ("sms_enabled", sms_enabled),
-        ("email", email),
+        ("company_id", company_id),
+        ("tracker_id", tracker_id),
     ):
         if val is not None:
             body[key] = val
+    # `name` is generated by CallRail and `email` designates an email-only
+    # recipient at creation time; neither is an updatable field.
+    ignored = [k for k, v in (("name", name), ("email", email)) if v is not None]
+    if ignored:
+        logger.warning("update_notification: %s cannot be changed via the API; ignored.", ignored)
     if not body:
-        return _err_msg("No fields supplied to update.")
+        return _err_msg(
+            "No updatable fields supplied. name and email cannot be changed "
+            "via the API; delete the rule and create a new one instead."
+        )
     try:
         aid = client.resolve_account_id(account_id)
         return _ok(client.put(f"a/{aid}/notifications/{notification_id}.json", body))
@@ -4133,7 +5019,7 @@ def update_notification(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DELETE)
 def delete_notification(notification_id: str, account_id: str | None = None) -> str:
     """Delete a notification rule. The rule is gone. To keep but mute
     it, prefer `update_notification(send_email=False, send_desktop=False,
@@ -4165,10 +5051,12 @@ def delete_notification(notification_id: str, account_id: str | None = None) -> 
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_notifications(
     company_id: str | None = None,
     user_id: str | None = None,
+    notification_type: str | None = None,
+    email: str | None = None,
     per_page: int = 100,
     page: int = 1,
     account_id: str | None = None,
@@ -4176,11 +5064,23 @@ def list_notifications(
     """List notification rules on the account.
 
     Args:
-        company_id, user_id: Optional filters.
+        company_id: Applied CLIENT-SIDE (CallRail ignores it as a query
+            param). Keeps rules scoped to that company plus account-wide
+            rules (company_id null), which also fire for it. The page's
+            `total_records` describes the unfiltered query; see
+            `company_filter` in the response.
+        user_id: Server-side filter on the notified user.
+        notification_type: Server-side filter: 'push', 'email', or
+            'desktop'.
+        email: Server-side filter on an email-only recipient.
         per_page: Page size (max 250).
         page: 1-indexed.
         account_id: Auto-resolves if omitted.
     """
+    if notification_type is not None and notification_type not in VALID_NOTIFICATION_TYPES:
+        return _err_msg(
+            f"notification_type={notification_type!r} must be one of {VALID_NOTIFICATION_TYPES}."
+        )
     if company_id is not None:
         ok, msg = _validate_id_shape(company_id, "company_id", prefix="COM")
         if not ok:
@@ -4195,11 +5095,29 @@ def list_notifications(
             "per_page": _clamp_per_page(per_page),
             "page": _clamp_page(page),
         }
-        if company_id:
-            params["company_id"] = company_id
         if user_id:
             params["user_id"] = user_id
-        return _ok(client.get(f"a/{aid}/notifications.json", params))
+        if notification_type:
+            params["notification_type"] = notification_type
+        if email:
+            params["email"] = email
+        data = client.get(f"a/{aid}/notifications.json", params)
+        if company_id:
+            rules = data.get("notifications")
+            rules = rules if isinstance(rules, list) else []
+            kept = [
+                r for r in rules
+                if isinstance(r, dict) and r.get("company_id") in (company_id, None)
+            ]
+            data["notifications"] = kept
+            data["company_filter"] = {
+                "company_id": company_id,
+                "applied": "client-side",
+                "matched_on_this_page": len(kept),
+                "note": "Includes account-wide rules (company_id null). "
+                        "total_records counts the unfiltered query.",
+            }
+        return _ok(data)
     except CallRailError as e:
         return _err(e)
 
@@ -4233,12 +5151,14 @@ _TIMESERIES_MAX_POINTS = 200
 VALID_TIMESERIES_INTERVALS: tuple[str, ...] = ("hour", "day", "week", "month", "year")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_leads(
     account_id: str | None = None,
     company_id: str | None = None,
     per_page: int = 100,
     page: int = 1,
+    sort: str | None = None,
+    order: str | None = None,
 ) -> str:
     """List leads (unique people) across calls, forms, and texts.
 
@@ -4257,18 +5177,32 @@ def list_leads(
         JSON string with `page`, `per_page`, `total_pages`,
         `total_records`, and `leads[]`. Each lead has id ('PER...'),
         name, phone, email, company_id, company_name, created_at.
+
+    `sort` ('created_at' | 'name' | 'email') with `order` ('asc' | 'desc').
     """
+    if sort is not None:
+        ok, msg = _validate_choice(sort, "sort", VALID_LEAD_SORT_FIELDS)
+        if not ok:
+            return _err_msg(msg)
+    if order is not None:
+        ok, msg = _validate_choice(order, "order", VALID_SORT_ORDERS)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if company_id:
             params["company_id"] = company_id
+        if sort:
+            params["sort"] = sort
+        if order:
+            params["order"] = order
         return _ok(client.get(f"a/{aid}/leads.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_lead_timeline(
     lead_id: str,
     account_id: str | None = None,
@@ -4306,12 +5240,16 @@ def get_lead_timeline(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def list_sms_threads(
     account_id: str | None = None,
     company_id: str | None = None,
     per_page: int = 100,
     page: int = 1,
+    days: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    search: str | None = None,
 ) -> str:
     """List SMS threads. Unlike `list_text_messages` (conversation
     transcripts), threads carry the lead-management surface: `notes`,
@@ -4329,18 +5267,33 @@ def list_sms_threads(
         customer_name / customer_phone_number, current + initial
         tracker/tracking-number, notes, value, tags,
         lead_qualification, state.
+
+    `days` / `start_date` / `end_date` window the threads (CallRail wants
+    start and end together, so a lone start_date is paired with today);
+    `search` matches phone number, name and tag name.
     """
+    if days is not None or start_date is not None or end_date is not None:
+        ok, msg = _validate_window(days or 0, start_date, end_date)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
         if company_id:
             params["company_id"] = company_id
+        if days is not None or start_date is not None or end_date is not None:
+            window = _date_window(days or 0, start_date, end_date)
+            if window.get("start_date") and not window.get("end_date"):
+                window["end_date"] = datetime.now(timezone.utc).date().isoformat()
+            params.update(window)
+        if search:
+            params["search"] = search
         return _ok(client.get(f"a/{aid}/sms-threads.json", params))
     except CallRailError as e:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_sms_thread(thread_id: str, account_id: str | None = None) -> str:
     """Get one SMS thread's lead-management record (notes, value, tags,
     lead_qualification, state). For the message transcript itself use
@@ -4366,7 +5319,7 @@ def get_sms_thread(thread_id: str, account_id: str | None = None) -> str:
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_UPDATE)
 def update_sms_thread(
     thread_id: str,
     notes: str | None = None,
@@ -4383,13 +5336,14 @@ def update_sms_thread(
     Args:
         thread_id: Thread id (from `list_sms_threads`).
         notes: Note text (max 4000 chars). Empty string rejected.
-        value: Numeric lead value.
+        value: Monetary value; sent as a currency string ("12.50"), which
+            is what PUT /sms-threads accepts.
         tags: Tag names to apply (max 100).
         append_tags: If True (default), `tags` are ADDED to existing
             ones (CallRail's `append_tags` flag). If False, `tags`
             REPLACES the thread's tag list.
-        lead_qualification: e.g. 'good_lead', 'not_a_lead'. Values are
-            plan-configurable so unknown strings are passed through.
+        lead_qualification: 'good_lead' or 'not_a_lead' (CallRail docs;
+            null clears it, which this tool does not expose).
         account_id: Auto-resolves if omitted.
     """
     ok, msg = _require_non_empty(thread_id, "thread_id")
@@ -4409,7 +5363,7 @@ def update_sms_thread(
         if not ok:
             return _err_msg(msg)
     if lead_qualification is not None:
-        ok, msg = _require_non_empty(lead_qualification, "lead_qualification")
+        ok, msg = _validate_choice(lead_qualification, "lead_qualification", VALID_LEAD_STATUS_WRITES)
         if not ok:
             return _err_msg(msg)
     if tags is not None:
@@ -4429,7 +5383,8 @@ def update_sms_thread(
     if notes is not None:
         body["notes"] = notes
     if value is not None:
-        body["value"] = value
+        # Documented type is string (e.g. "$5.00").
+        body["value"] = f"{value:.2f}"
     if tags is not None:
         body["tags"] = tags
         body["append_tags"] = append_tags
@@ -4444,7 +5399,7 @@ def update_sms_thread(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def call_stats(
     group_by: str = "source",
     days: int = 30,
@@ -4453,6 +5408,17 @@ def call_stats(
     company_id: str | None = None,
     fields: str | None = None,
     account_id: str | None = None,
+    answer_status: str | None = None,
+    direction: str | None = None,
+    device: str | None = None,
+    lead_status: str | None = None,
+    first_time_callers: bool | None = None,
+    min_duration: int | None = None,
+    max_duration: int | None = None,
+    tags: list[str] | None = None,
+    tracker_ids: list[str] | None = None,
+    search: str | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """Server-side call aggregation via CallRail's /calls/summary.json.
 
@@ -4476,6 +5442,15 @@ def call_stats(
     Returns:
         JSON string with `start_date`, `end_date`, `time_zone`,
         `total_results` and `grouped_results[]` ({key, <metrics>}).
+
+    Server-side filters (documented, live-verified 2026-10-05):
+    `answer_status` ('answered' | 'missed' | 'voicemail'; missed includes
+    voicemail), `direction`, `device`, `lead_status` ('good_lead' |
+    'not_a_lead' | 'not_scored'), `first_time_callers`, `min_duration` /
+    `max_duration` (seconds), `tags` (any of), `tracker_ids`, `search`
+    (phone fragment, name, note, source) and `time_zone` (IANA; also sets
+    "today" for `days`). `fields` is validated against
+    VALID_CALL_STATS_FIELDS.
     """
     if group_by not in VALID_CALL_STATS_GROUP_BY:
         return _err_msg(
@@ -4484,12 +5459,59 @@ def call_stats(
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
+    for val, nm, choices in (
+        (answer_status, "answer_status", VALID_ANSWER_STATUS),
+        (direction, "direction", VALID_CALL_DIRECTIONS),
+        (device, "device", VALID_CALL_DEVICES),
+        (lead_status, "lead_status", VALID_LEAD_STATUS_FILTERS),
+    ):
+        if val is not None:
+            ok, msg = _validate_choice(val, nm, choices)
+            if not ok:
+                return _err_msg(msg)
+    for dval, nm in ((min_duration, "min_duration"), (max_duration, "max_duration")):
+        if dval is not None and (isinstance(dval, bool) or not isinstance(dval, int) or dval < 0):
+            return _err_msg(f"{nm} must be a non-negative integer number of seconds.")
+    if first_time_callers is not None and not isinstance(first_time_callers, bool):
+        return _err_msg("first_time_callers must be true or false.")
+    for lval, nm in ((tags, "tags"), (tracker_ids, "tracker_ids")):
+        if lval is not None:
+            ok, msg = _validate_filter_list(lval, nm)
+            if not ok:
+                return _err_msg(msg)
+    if tracker_ids:
+        for tid in tracker_ids:
+            ok, msg = _validate_id_shape(tid, "tracker_ids", prefix="TRK")
+            if not ok:
+                return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
+    if fields is not None:
+        ok, msg = _validate_fields_list(fields, "fields", VALID_CALL_STATS_FIELDS)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"group_by": group_by}
-        params.update(_date_window(days, start_date, end_date))
+        params.update(_date_window(days, start_date, end_date, tz=time_zone or "UTC"))
         if company_id:
             params["company_id"] = company_id
+        for key, fval in (
+            ("answer_status", answer_status), ("direction", direction),
+            ("device", device), ("lead_status", lead_status),
+            ("min_duration", min_duration), ("max_duration", max_duration),
+            ("search", search), ("time_zone", time_zone),
+        ):
+            if fval is not None and fval != "":
+                params[key] = fval
+        if first_time_callers is not None:
+            params["first_time_callers"] = "true" if first_time_callers else "false"
+        if tags:
+            params["tags[]"] = tags
+        if tracker_ids:
+            params["tracker_ids[]"] = tracker_ids
         if fields:
             params["fields"] = fields
         return _ok(client.get(f"a/{aid}/calls/summary.json", params))
@@ -4497,7 +5519,7 @@ def call_stats(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def call_timeseries(
     days: int = 30,
     start_date: str | None = None,
@@ -4506,6 +5528,17 @@ def call_timeseries(
     fields: str | None = None,
     interval: str | None = None,
     account_id: str | None = None,
+    answer_status: str | None = None,
+    direction: str | None = None,
+    device: str | None = None,
+    lead_status: str | None = None,
+    first_time_callers: bool | None = None,
+    min_duration: int | None = None,
+    max_duration: int | None = None,
+    tags: list[str] | None = None,
+    tracker_ids: list[str] | None = None,
+    search: str | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """Call volume over time via CallRail's /calls/timeseries.json. One
     request for a trend line instead of client-side bucketing.
@@ -4530,6 +5563,15 @@ def call_timeseries(
     Returns:
         JSON string with `total_results` and `data[]`, one entry per
         bucket ({key/date, <metrics>}).
+
+    Server-side filters (documented, live-verified 2026-10-05):
+    `answer_status` ('answered' | 'missed' | 'voicemail'; missed includes
+    voicemail), `direction`, `device`, `lead_status` ('good_lead' |
+    'not_a_lead' | 'not_scored'), `first_time_callers`, `min_duration` /
+    `max_duration` (seconds), `tags` (any of), `tracker_ids`, `search`
+    (phone fragment, name, note, source) and `time_zone` (IANA; also sets
+    "today" for `days`). `fields` is validated against
+    VALID_CALL_STATS_FIELDS.
     """
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
@@ -4538,11 +5580,14 @@ def call_timeseries(
         return _err_msg(
             f"interval={interval!r} must be one of {VALID_TIMESERIES_INTERVALS}."
         )
-    window = _date_window(days, start_date, end_date)
+    window = _date_window(days, start_date, end_date, tz=time_zone or "UTC")
     if interval in (None, "day", "hour") and window.get("start_date"):
+        # An explicit start_date without end_date leaves end_date out of the
+        # window (CallRail defaults it to today); this used to KeyError.
+        end_s = window.get("end_date") or datetime.now(timezone.utc).date().isoformat()
         try:
             span = (
-                date.fromisoformat(window["end_date"])
+                date.fromisoformat(end_s)
                 - date.fromisoformat(window["start_date"])
             ).days + 1
         except ValueError:
@@ -4555,12 +5600,59 @@ def call_timeseries(
                 f"for /calls/timeseries.json. Use interval='week' or 'month', "
                 f"or narrow the window."
             )
+    for val, nm, choices in (
+        (answer_status, "answer_status", VALID_ANSWER_STATUS),
+        (direction, "direction", VALID_CALL_DIRECTIONS),
+        (device, "device", VALID_CALL_DEVICES),
+        (lead_status, "lead_status", VALID_LEAD_STATUS_FILTERS),
+    ):
+        if val is not None:
+            ok, msg = _validate_choice(val, nm, choices)
+            if not ok:
+                return _err_msg(msg)
+    for dval, nm in ((min_duration, "min_duration"), (max_duration, "max_duration")):
+        if dval is not None and (isinstance(dval, bool) or not isinstance(dval, int) or dval < 0):
+            return _err_msg(f"{nm} must be a non-negative integer number of seconds.")
+    if first_time_callers is not None and not isinstance(first_time_callers, bool):
+        return _err_msg("first_time_callers must be true or false.")
+    for lval, nm in ((tags, "tags"), (tracker_ids, "tracker_ids")):
+        if lval is not None:
+            ok, msg = _validate_filter_list(lval, nm)
+            if not ok:
+                return _err_msg(msg)
+    if tracker_ids:
+        for tid in tracker_ids:
+            ok, msg = _validate_id_shape(tid, "tracker_ids", prefix="TRK")
+            if not ok:
+                return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
+    if fields is not None:
+        ok, msg = _validate_fields_list(fields, "fields", VALID_CALL_STATS_FIELDS)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {}
         params.update(window)
         if company_id:
             params["company_id"] = company_id
+        for key, fval in (
+            ("answer_status", answer_status), ("direction", direction),
+            ("device", device), ("lead_status", lead_status),
+            ("min_duration", min_duration), ("max_duration", max_duration),
+            ("search", search), ("time_zone", time_zone),
+        ):
+            if fval is not None and fval != "":
+                params[key] = fval
+        if first_time_callers is not None:
+            params["first_time_callers"] = "true" if first_time_callers else "false"
+        if tags:
+            params["tags[]"] = tags
+        if tracker_ids:
+            params["tracker_ids[]"] = tracker_ids
         if fields:
             params["fields"] = fields
         if interval:
@@ -4570,13 +5662,18 @@ def call_timeseries(
         return _err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def form_stats(
     days: int = 30,
     start_date: str | None = None,
     end_date: str | None = None,
     company_id: str | None = None,
     account_id: str | None = None,
+    group_by: str | None = None,
+    fields: str | None = None,
+    lead_status: str | None = None,
+    tags: list[str] | None = None,
+    time_zone: str | None = None,
 ) -> str:
     """Server-side form-submission totals via /forms/summary.json.
 
@@ -4589,27 +5686,59 @@ def form_stats(
     Returns:
         JSON string with `start_date`, `end_date`, `time_zone`, and
         `total_results` (e.g. {"total_forms": N}).
+
+    `group_by` ('source' | 'keywords' | 'campaign' | 'referrer' |
+    'landing_page' | 'form_name' | 'company') returns `grouped_results`;
+    `fields` (comma-separated) selects additional summary fields;
+    `lead_status`, `tags` and `time_zone` filter as on `call_stats`.
     """
     ok, msg = _validate_window(days, start_date, end_date, require_window=True)
     if not ok:
         return _err_msg(msg)
+    if group_by is not None:
+        ok, msg = _validate_choice(group_by, "group_by", VALID_FORM_STATS_GROUP_BY)
+        if not ok:
+            return _err_msg(msg)
+    if fields is not None and (not isinstance(fields, str) or not fields.strip()):
+        return _err_msg("fields must be a non-empty comma-separated string.")
+    if lead_status is not None:
+        ok, msg = _validate_choice(lead_status, "lead_status", VALID_LEAD_STATUS_FILTERS)
+        if not ok:
+            return _err_msg(msg)
+    if tags is not None:
+        ok, msg = _validate_filter_list(tags, "tags")
+        if not ok:
+            return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {}
-        params.update(_date_window(days, start_date, end_date))
+        params.update(_date_window(days, start_date, end_date, tz=time_zone or "UTC"))
         if company_id:
             params["company_id"] = company_id
+        for key, val in (
+            ("group_by", group_by), ("fields", fields),
+            ("lead_status", lead_status), ("time_zone", time_zone),
+        ):
+            if val:
+                params[key] = val
+        if tags:
+            params["tags[]"] = tags
         return _ok(client.get(f"a/{aid}/forms/summary.json", params))
     except CallRailError as e:
-        return _err(e)
+        return _form_submission_err(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 def get_call_page_views(
     call_id: str,
     account_id: str | None = None,
     per_page: int = 100,
     page: int = 1,
+    time_zone: str | None = None,
 ) -> str:
     """Get the visitor's page-view history behind a call: which pages
     they browsed (with timestamps) before and around dialing. Pairs
@@ -4624,6 +5753,9 @@ def get_call_page_views(
 
     Returns:
         JSON string with `page_views[]` (paginated).
+
+    Only available for calls placed to session trackers (a CallRail
+    restriction). `time_zone` (IANA) localizes the timestamps.
     """
     ok, msg = _require_non_empty(call_id, "call_id")
     if not ok:
@@ -4631,9 +5763,15 @@ def get_call_page_views(
     ok, msg = _validate_id_shape(call_id, "call_id", prefix="CAL")
     if not ok:
         return _err_msg(msg)
+    if time_zone is not None:
+        ok, msg = _validate_time_zone(time_zone)
+        if not ok:
+            return _err_msg(msg)
     try:
         aid = client.resolve_account_id(account_id)
         params: dict[str, Any] = {"per_page": _clamp_per_page(per_page), "page": _clamp_page(page)}
+        if time_zone:
+            params["time_zone"] = time_zone
         return _ok(client.get(f"a/{aid}/calls/{call_id}/page_views.json", params))
     except CallRailError as e:
         return _err(e)

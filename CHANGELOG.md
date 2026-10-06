@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-05
+
+Health sweep. The whole tool surface was re-read against CallRail's
+current API documentation (fetched 2026-10-05) and probed live with
+read-only requests, then two independent reviews went through the code.
+Every finding below was reproduced before it was fixed. Still 57 tools,
+on both MCP SDK majors.
+
+### Fixed: what the numbers meant
+
+- **Voicemail no longer counts as answered.** CallRail sets
+  `answered=true` on voicemail calls because its system picked up.
+  `call_summary`, `spam_detector`, `call_eligibility_check` and
+  `bulk_update_calls` now count a call as answered only when a person
+  did, and report voicemail separately (`voicemail` counters and
+  columns, "went to voicemail" reasons, Google Ads eligibility false).
+- `call_timeseries` raised `KeyError` when a window had no explicit
+  `end_date`; it now fills in today.
+- `compare_periods` excludes a company from BOTH windows when either
+  window failed or was truncated, instead of comparing a complete window
+  against a partial one, and reports `excluded_companies`,
+  `scan_truncated_companies` and a `scan_note`.
+- Legacy time zone abbreviations on company records (EST, PDT, HST and
+  friends) are mapped to IANA names before use; `zoneinfo` only knew a
+  few of them.
+- Defensive shape checks on CallRail payloads (`source` as a string vs
+  object, `tracking_numbers` as list vs string, non-numeric fields) and
+  `OverflowError` handling on absurd numeric inputs.
+- `update_call(spam=False)` returns an explicit error: CallRail cannot
+  clear spam status through the API.
+- `_safe_path` and the request layer turn `UnicodeError` into a
+  `CallRailError` instead of a traceback; DELETE retries that end in a
+  404 report `already_gone` instead of failing.
+
+### Fixed: request contracts aligned with the documented bodies
+
+- **Notifications.** `alert_type` is the documented closed enum (all,
+  first_call, missed_and_vm, vm_only; CallRail rejects the legacy
+  values), `notification_type` is push, email or desktop, `name` is not
+  sent (CallRail generates it), `email` rules need a company or tracker,
+  and `company_id` on `list_notifications` is applied client-side
+  because the API ignores it. `update_notification` accepts
+  `company_id` / `tracker_id` and explains why `name` and `email`
+  cannot change.
+- **Companies.** POST /companies accepts only `name` and `time_zone`, so
+  `create_company` applies feature toggles with a follow-up PUT and
+  reports `settings_applied`. `lead_scoring_enabled` is read-only in the
+  API and now returns an error instead of being silently dropped; the
+  deprecated no-op toggles (`swap_exclude_jquery`,
+  `keyword_spotting_enabled`) are not sent and are reported under
+  `api_warnings`. `update_company` gains the documented
+  `swap_ppc_override`, `swap_landing_override`, `swap_cookie_duration`
+  and `swap_cookie_duration_unit`.
+- **Users.** PUT /users has no `role` field and an email change requires
+  the user's current password, which this server never handles;
+  `update_user` rejects both with the reason instead of sending a body
+  CallRail ignores.
+- **Form submissions.** `create_form_submission` requires `form_url` and
+  `form_data` (CallRail parses the phone number out of `form_data`),
+  accepts `session_id` in place of the referrer trio, drops the
+  `customer_*` parameters that the endpoint never accepted, and applies
+  note, tags, value and lead status with a follow-up PUT
+  (`lead_fields_applied`). `update_form_submission` rejects `spam`
+  (there is no such field on form submissions), gains `append_tags`,
+  and validates `lead_status` against good_lead / not_a_lead.
+- **Monetary values** are sent as the documented currency string
+  ("12.50") on form submissions and SMS threads; `lead_qualification`
+  on SMS threads is validated against the documented enum.
+- **Trackers.** `update_tracker` reads the current call flow and merges
+  the change, because PUT /trackers replaces the whole `call_flow`
+  object; a greeting change alone no longer requires re-sending the
+  destination, and trackers on advanced (IVR) flows are refused rather
+  than flattened. New: `recording_enabled`, `greeting_recording_url`,
+  `swap_targets`, `campaign_name`. `create_tracker` validates the
+  per-source fields (`search_engine` / `search_type` for search,
+  `landing` for landing types, `referrer` for web referrers) and accepts
+  `swap_targets` and `campaign_name`.
+- **Tags.** `create_tag` supports account-level tags (`tag_level`),
+  `update_tag` can disable or re-enable a tag, and `list_tags` rejects
+  the `tag_level=account` + `company_id` combination CallRail refuses.
+- **Transcripts.** `get_call_transcript` requests the documented fields
+  on GET /calls/{id}.json (`transcription`, `conversational_transcript`,
+  `call_summary`, `call_highlights`, `keywords_spotted`, `sentiment`,
+  `speaker_percent`) and falls back to the undocumented per-call
+  endpoint only when they are empty.
+- `search_calls_by_number` narrows server-side with CallRail's `search`
+  parameter before the exact suffix match, so one page usually replaces
+  a 50-page scan.
+- Form-submission tools explain the 403 CallRail returns when no company
+  has Form Tracking enabled.
+
+### Added: documented filters and fields
+
+- `list_calls`: `search`, `direction`, `device`, `call_type`,
+  `lead_status`, `tracker_id`, `tags`, `sort`, `order`, `time_zone`.
+- `call_stats` and `call_timeseries`: `answer_status`, `direction`,
+  `device`, `lead_status`, `first_time_callers`, `min_duration`,
+  `max_duration`, `tags`, `tracker_ids`, `search`, `time_zone`; `fields`
+  is validated against the documented summary fields.
+- `form_stats`: `group_by` (including `form_name`), `fields`,
+  `lead_status`, `tags`, `time_zone`.
+- `list_form_submissions`: `lead_status`, `tags`, `person_lead`, `sort`,
+  `order`, `time_zone`.
+- `list_users` is paginated and takes `company_id`, `search`, `sort`,
+  `order`. `list_tags`: `status`, `tag_level`. `list_leads`: `sort`,
+  `order`. `list_sms_threads`: date window and `search`.
+- `fields` on `list_accounts` (`numeric_id`), `list_companies` /
+  `get_company` (`verified_caller_ids`), `list_trackers`
+  (`campaign_name`, `swap_targets`), `list_integrations` /
+  `get_integration` (`signing_key`); `type` and `search` on
+  `list_trackers`; `time_zone` on `call_summary` and
+  `get_call_page_views`; `agent_id` on `create_outbound_call`.
+- `usage_summary` and `compare_periods` send the account's time zone to
+  CallRail so server-side day boundaries match the local computation.
+- **Tool annotations** on all 57 tools (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`).
+- **`CALLRAIL_ACCOUNT_ID`** pins the account; otherwise the resolved id
+  is cached per client, saving one request per tool call.
+- `Request-From: callrail-mcp` header on every request.
+- `spam_detector` and `bulk_update_calls` report `scan` statistics
+  (`scan_truncated`, `scan_total_records`) and `already_tagged_count`.
+
+### Changed: docs
+
+- Rate limits corrected to CallRail's documented 1,000 per hour and
+  10,000 per day (the README said 60 per minute).
+- Recording URL wording: good for at least 24 hours, not "expires in
+  minutes"; HIPAA accounts get a temporary 24-hour URL.
+- "No date window" comments and docstrings now say what CallRail does
+  (its `recent` 7-day default) instead of "all-time"; the 25-month
+  retention limit is documented.
+- `lead_status` write values are `good_lead` / `not_a_lead` (the old
+  docstrings listed an `unknown` value that does not exist).
+- README: voicemail and time zone notes, annotations, account pinning,
+  the Form Tracking 403, the community TypeScript server, and the
+  conversation-intelligence field names.
+
 ## [1.2.2] - 2026-09-07
 
 Maintenance release. The only change to the package is its version

@@ -35,6 +35,9 @@ def server_with_mock_client(monkeypatch: pytest.MonkeyPatch) -> None:
     Use the `responses` decorator on individual tests to register URL stubs.
     """
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    # v1.3.0: the env override would bypass every a.json stub below if a
+    # developer's shell happened to export it.
+    monkeypatch.delenv("CALLRAIL_ACCOUNT_ID", raising=False)
     server_mod._client = CallRailClient(max_retries=0)
 
 
@@ -487,17 +490,43 @@ def test_update_tracker_rejects_garbage_destination(monkeypatch: pytest.MonkeyPa
     assert out["error"] is True
 
 
-def test_update_tracker_C1_greeting_text_alone_rejected(
-    monkeypatch: pytest.MonkeyPatch,
+@responses.activate
+def test_update_tracker_greeting_text_alone_merges_current_call_flow(
+    server_with_mock_client,
 ) -> None:
-    """CRITICAL: update_tracker(greeting_text="x") alone would replace call_flow
-    with an object missing destination_number, breaking the tracker."""
-    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
-    server_mod._client = None
+    """CallRail's PUT replaces the whole call_flow object. v0.3.2 refused
+    greeting_text without destination_number; v1.3.0 reads the current flow
+    and merges, so the destination and recording flag survive."""
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1", "call_flow": {
+            "type": "basic", "recording_enabled": True,
+            "destination_number": "+14129548337",
+            "greeting_text": None, "greeting_recording_url": None,
+        }},
+        status=200,
+    )
+    responses.add(
+        responses.PUT,
+        "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1"},
+        status=200,
+    )
     out = json.loads(server_mod.update_tracker(tracker_id="TRK1", greeting_text="Hello"))
-    assert out["error"] is True
-    assert "destination_number" in out["message"]
-    assert "greeting_text" in out["message"]
+    assert out.get("error") is not True
+    body = json.loads(responses.calls[-1].request.body)
+    assert body == {"call_flow": {
+        "type": "basic", "recording_enabled": True,
+        "destination_number": "+14129548337",
+        "greeting_text": "Hello", "greeting_recording_url": None,
+    }}
 
 
 def test_update_tracker_oversize_name_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -660,6 +689,15 @@ def test_update_tracker_greeting_with_destination_happy_path(
         status=200,
     )
     responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1", "call_flow": {
+            "type": "basic", "recording_enabled": False,
+            "destination_number": "+14125550000", "greeting_text": None,
+        }},
+        status=200,
+    )
+    responses.add(
         responses.PUT,
         "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
         json={"id": "TRK1"},
@@ -672,7 +710,8 @@ def test_update_tracker_greeting_with_destination_happy_path(
             greeting_text="Welcome",
         )
     )
-    body = json.loads(responses.calls[1].request.body)
+    body = json.loads(responses.calls[2].request.body)
+    assert body["call_flow"]["recording_enabled"] is False  # carried over from the current flow
     # Both destination_number AND greeting_text are inside the same call_flow.
     assert body["call_flow"]["destination_number"] == "+14129548337"
     assert body["call_flow"]["greeting_text"] == "Welcome"
@@ -1502,12 +1541,12 @@ def test_get_call_transcript_happy_path(server_with_mock_client) -> None:
     )
     responses.add(
         responses.GET,
-        "https://api.callrail.com/v3/a/ACC1/calls/CAL1/transcription.json",
-        json={"transcription": [{"speaker": "agent", "text": "Hello"}]},
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1", "transcription": "Hello", "conversational_transcript": None},
         status=200,
     )
     out = json.loads(server_mod.get_call_transcript(call_id="CAL1"))
-    assert "transcription" in out
+    assert out["transcription"] == "Hello"
 
 
 @responses.activate
@@ -2784,7 +2823,10 @@ def test_v061_update_user_empty_email_says_required(
     server_mod._client = None
     out = json.loads(server_mod.update_user(user_id="USR_X", email="   "))
     assert out["error"] is True
-    assert "required" in out["message"]
+    # v1.3.0: email changes need the user's current password (CallRail
+    # docs), which this server never handles, so every email value is
+    # rejected with that explanation before any format check.
+    assert "password" in out["message"]
 
 
 # ============================================================
@@ -2871,7 +2913,8 @@ def test_v070_create_form_submission_requires_three_url_fields(
     monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
     server_mod._client = None
     out = json.loads(server_mod.create_form_submission(
-        company_id="COM_X", referrer="", referring_url="x", landing_page_url="y",
+        company_id="COM_X", form_url="https://x/form", form_data={"phone": "4125551234"},
+        referrer="", referring_url="x", landing_page_url="y",
     ))
     assert out["error"] is True
     assert "referrer" in out["message"]
@@ -2893,16 +2936,23 @@ def test_v070_create_form_submission_happy(server_with_mock_client) -> None:
     )
     out = json.loads(server_mod.create_form_submission(
         company_id="COM_X",
+        form_url="https://offline/walk-in",
+        form_data={"name": "Walk-In Lead", "phone": "412-555-1234"},
         referrer="(direct)",
         referring_url="https://offline",
         landing_page_url="https://offline",
-        customer_name="Walk-In Lead",
-        note="Came in person",
     ))
     assert out["id"] == "FOR_NEW"
     body = json.loads(responses.calls[1].request.body)
-    assert body["company_id"] == "COM_X"
-    assert body["customer_name"] == "Walk-In Lead"
+    assert body == {
+        "company_id": "COM_X",
+        "form_url": "https://offline/walk-in",
+        "form_data": {"name": "Walk-In Lead", "phone": "412-555-1234"},
+        "referrer": "(direct)",
+        "referring_url": "https://offline",
+        "landing_page_url": "https://offline",
+    }
+    assert len(responses.calls) == 2  # no lead fields, so no follow-up PUT
 
 
 def test_v070_create_outbound_call_requires_confirmation(
@@ -2971,7 +3021,7 @@ def test_v070_update_notification_no_fields(monkeypatch: pytest.MonkeyPatch) -> 
     server_mod._client = None
     out = json.loads(server_mod.update_notification(notification_id="1234"))
     assert out["error"] is True
-    assert "No fields supplied" in out["message"]
+    assert "No updatable fields supplied" in out["message"]
 
 
 @responses.activate
@@ -3019,11 +3069,12 @@ def test_v060_update_user_happy(server_with_mock_client) -> None:
     responses.add(
         responses.PUT,
         "https://api.callrail.com/v3/a/ACC1/users/USR_X.json",
-        json={"id": "USR_X", "role": "admin"},
+        json={"id": "USR_X", "companies": [{"id": "COM1", "name": "A"}]},
         status=200,
     )
-    out = json.loads(server_mod.update_user(user_id="USR_X", role="admin"))
-    assert out["role"] == "admin"
+    out = json.loads(server_mod.update_user(user_id="USR_X", company_ids=["COM1"]))
+    assert out["companies"][0]["id"] == "COM1"
+    assert json.loads(responses.calls[1].request.body) == {"companies": ["COM1"]}
 
 
 @responses.activate
@@ -3649,6 +3700,12 @@ def test_v110_transcript_404_carries_premium_ci_hint(
     _stub_account()
     responses.add(
         responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls/CAL404.json",
+        json={"id": "CAL404", "transcription": None, "conversational_transcript": None},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
         "https://api.callrail.com/v3/a/ACC1/calls/CAL404/transcription.json",
         json={"error": "not found"},
         status=404,
@@ -3712,8 +3769,8 @@ def test_v111_nan_value_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         out = json.loads(server_mod.update_sms_thread(thread_id="THR1", value=bad))
         assert out["error"] is True and "finite" in out["message"]
         out = json.loads(server_mod.create_form_submission(
-            company_id="COM1", referrer="(direct)",
-            referring_url="https://x", landing_page_url="https://y",
+            company_id="COM1", form_url="https://x/f", form_data={"phone": "4125551234"},
+            referrer="(direct)", referring_url="https://x", landing_page_url="https://y",
             value=bad))
         assert out["error"] is True and "finite" in out["message"]
 
@@ -4149,3 +4206,841 @@ def test_v120_compare_periods_excludes_failed_company_from_totals(
     assert out["partial_failures"]
     assert out["current"]["total_minutes"] == 0
     assert out["by_company"] == []
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0: voicemail counts as missed (CallRail's own definition), form 403
+# hint, account-id resolution, MCP tool annotations (2026-10 sweep)
+# ---------------------------------------------------------------------------
+
+_ACCOUNTS = {"accounts": [{"id": "ACC1"}]}
+_A = "https://api.callrail.com/v3/a.json"
+_CALLS = "https://api.callrail.com/v3/a/ACC1/calls.json"
+
+
+def _voicemail_mix() -> dict:
+    return {"calls": [
+        {"id": "CAL1", "answered": True, "voicemail": False, "duration": 120,
+         "first_call": True, "customer_phone_number": "+14125550001", "source": "Google Ads"},
+        {"id": "CAL2", "answered": True, "voicemail": True, "duration": 5,
+         "first_call": True, "customer_phone_number": "+14125550002", "source": "Google Ads"},
+        {"id": "CAL3", "answered": False, "voicemail": False, "duration": 0,
+         "first_call": False, "customer_phone_number": "+14125550003", "source": "Direct"},
+    ], "total_pages": 1}
+
+
+@responses.activate
+def test_v130_call_summary_counts_voicemail_as_missed(server_with_mock_client) -> None:
+    """Live-verified 2026-10-05: CallRail's answer_status=missed includes
+    voicemail calls even though they carry answered=true. A summary that
+    read the raw field undercounted missed by 30% on a real account."""
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(responses.GET, _CALLS, json=_voicemail_mix(), status=200)
+    out = json.loads(server_mod.call_summary(company_id="COM1", days=7))
+    assert (out["total_calls"], out["answered"], out["missed"], out["voicemail"]) == (3, 1, 2, 1)
+
+
+@responses.activate
+def test_v130_spam_detector_treats_voicemail_as_unanswered(server_with_mock_client) -> None:
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(responses.GET, _CALLS, json=_voicemail_mix(), status=200)
+    out = server_mod.spam_detector(company_id="COM1", days=30)
+    assert "went to voicemail" in out
+    assert '"voicemail": true' in out
+
+
+@responses.activate
+def test_v130_eligibility_voicemail_is_not_answered(server_with_mock_client) -> None:
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL2.json",
+        json={"id": "CAL2", "answered": True, "voicemail": True, "duration": 90,
+              "gclid": "abc123", "source": "Google Ads", "utm_source": "google"},
+        status=200)
+    out = server_mod.call_eligibility_check("CAL2")
+    assert "voicemail" in out.lower()
+    assert '"answered": false' in out
+    assert '"google_ads_eligible": false' in out
+
+
+@responses.activate
+def test_v130_bulk_update_preview_shows_voicemail(server_with_mock_client) -> None:
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(responses.GET, _CALLS, json=_voicemail_mix(), status=200)
+    out = json.loads(server_mod.bulk_update_calls(
+        company_id="COM1", days=7, set_note="x", dry_run=True))
+    rows = {r["id"]: r for r in out["would_update_calls"]}
+    assert rows["CAL2"]["voicemail"] is True and rows["CAL1"]["voicemail"] is False
+
+
+@responses.activate
+def test_v130_list_calls_docstring_explains_voicemail() -> None:
+    assert "includes calls that reached voicemail" in (server_mod.list_calls.__doc__ or "")
+
+
+@pytest.mark.parametrize("tool,url", [
+    ("list_form_submissions", "https://api.callrail.com/v3/a/ACC1/form_submissions.json"),
+    ("form_stats", "https://api.callrail.com/v3/a/ACC1/forms/summary.json"),
+])
+@responses.activate
+def test_v130_form_tools_hint_on_403(server_with_mock_client, tool, url) -> None:
+    """GET form_submissions.json returns 403 when no company has form
+    tracking enabled (every company reports form_capture=false), which a
+    bare error makes look like a broken key."""
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(responses.GET, url,
+                  json={"error": "You do not have permission to perform the requested action"},
+                  status=403)
+    out = json.loads(getattr(server_mod, tool)(days=7))
+    assert out["error"] is True and out["status"] == 403
+    assert "form tracking" in out["hint"].lower()
+
+
+@responses.activate
+def test_v130_form_tools_404_has_no_hint(server_with_mock_client) -> None:
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/form_submissions.json",
+                  json={"error": "not found"}, status=404)
+    out = json.loads(server_mod.list_form_submissions(days=7))
+    assert out["status"] == 404 and "hint" not in out
+
+
+@responses.activate
+def test_v130_account_id_env_override_skips_lookup(server_with_mock_client, monkeypatch) -> None:
+    monkeypatch.setenv("CALLRAIL_ACCOUNT_ID", "  ACCENV  ")
+    client = CallRailClient(max_retries=0)
+    assert client.resolve_account_id() == "ACCENV"
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_v130_explicit_account_id_beats_env(server_with_mock_client, monkeypatch) -> None:
+    monkeypatch.setenv("CALLRAIL_ACCOUNT_ID", "ACCENV")
+    assert CallRailClient(max_retries=0).resolve_account_id("ACCX") == "ACCX"
+
+
+@responses.activate
+def test_v130_empty_env_falls_through_to_lookup(server_with_mock_client, monkeypatch) -> None:
+    monkeypatch.setenv("CALLRAIL_ACCOUNT_ID", "   ")
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    assert CallRailClient(max_retries=0).resolve_account_id() == "ACC1"
+
+
+@responses.activate
+def test_v130_account_lookup_is_cached_per_client(server_with_mock_client) -> None:
+    """Every tool call used to pay for GET /a.json; now once per client."""
+    responses.add(responses.GET, _A, json=_ACCOUNTS, status=200)
+    client = CallRailClient(max_retries=0)
+    assert client.resolve_account_id() == "ACC1"
+    assert client.resolve_account_id() == "ACC1"
+    assert len(responses.calls) == 1
+    assert CallRailClient(max_retries=0).resolve_account_id() == "ACC1"
+    assert len(responses.calls) == 2
+
+
+_WRITE_TOOLS = {
+    "create_tracker", "update_tracker", "delete_tracker", "update_call", "add_call_tags",
+    "remove_call_tags", "update_form_submission", "create_tag", "update_tag", "delete_tag",
+    "bulk_update_calls", "create_company", "update_company", "delete_company", "create_user",
+    "update_user", "delete_user", "create_form_submission", "create_outbound_call",
+    "create_notification", "update_notification", "delete_notification", "update_sms_thread",
+    "spam_detector",  # auto_tag=True writes tags
+}
+
+
+def _ann(name: str) -> dict:
+    tool = {t.name: t for t in server_mod.mcp._tool_manager.list_tools()}[name]
+    assert tool.annotations is not None, name
+    return tool.annotations.model_dump(by_alias=True)
+
+
+@responses.activate
+def test_v130_every_tool_is_annotated_and_read_only_set_is_exact() -> None:
+    tools = server_mod.mcp._tool_manager.list_tools()
+    assert len(tools) == 57
+    non_read_only = {t.name for t in tools if not _ann(t.name)["readOnlyHint"]}
+    assert non_read_only == _WRITE_TOOLS
+
+
+@pytest.mark.parametrize("name,expect", [
+    ("list_calls", {"readOnlyHint": True, "destructiveHint": False}),
+    ("delete_company", {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True}),
+    ("bulk_update_calls", {"destructiveHint": True, "idempotentHint": False}),
+    ("create_outbound_call", {"openWorldHint": True, "destructiveHint": False}),
+    ("update_call", {"destructiveHint": False, "idempotentHint": True}),
+    ("create_tracker", {"destructiveHint": False, "idempotentHint": False}),
+])
+@responses.activate
+def test_v130_annotation_classes(name, expect) -> None:
+    got = _ann(name)
+    assert {k: got[k] for k in expect} == expect
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0: server-side filters, time zones and optional `fields` on read tools
+# ---------------------------------------------------------------------------
+
+def _qs(url: str) -> dict[str, list[str]]:
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(url).query)
+
+
+def _v130_stub(path: str, payload: dict[str, object] | None = None) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"https://api.callrail.com/v3/a/ACC1/{path}",
+        json=payload if payload is not None else {},
+        status=200,
+    )
+
+
+@responses.activate
+def test_v130_list_calls_forwards_server_side_filters(server_with_mock_client) -> None:
+    _v130_stub("calls.json", {"calls": [], "page": 1, "total_pages": 1})
+    out = json.loads(server_mod.list_calls(
+        days=7, search="412", direction="inbound", device="mobile", call_type="first_call",
+        lead_status="good_lead", tracker_id="TRK123", tags=["a", "b"], sort="duration",
+        order="desc", time_zone="America/New_York",
+    ))
+    assert out.get("error") is not True
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["search"] == ["412"]
+    assert qs["direction"] == ["inbound"]
+    assert qs["device"] == ["mobile"]
+    assert qs["call_type"] == ["first_call"]
+    assert qs["lead_status"] == ["good_lead"]
+    assert qs["tracker_id"] == ["TRK123"]
+    assert qs["tags[]"] == ["a", "b"]
+    assert qs["sort"] == ["duration"]
+    assert qs["order"] == ["desc"]
+    assert qs["time_zone"] == ["America/New_York"]
+    assert "start_date" in qs and "end_date" in qs
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"direction": "sideways"},
+    {"device": "tablet"},
+    {"call_type": "nope"},
+    {"lead_status": "maybe"},
+    {"order": "up"},
+    {"time_zone": "Mars/Olympus"},
+    {"time_zone": ""},
+    {"tracker_id": "COM123"},
+    {"tags": []},
+    {"tags": ["ok", ""]},
+])
+@responses.activate
+def test_v130_list_calls_rejects_bad_filters_before_network(server_with_mock_client, kwargs) -> None:
+    out = json.loads(server_mod.list_calls(days=7, **kwargs))
+    assert out["error"] is True
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_v130_list_calls_omits_filters_when_not_given(server_with_mock_client) -> None:
+    _v130_stub("calls.json", {"calls": [], "page": 1, "total_pages": 1})
+    server_mod.list_calls(days=7)
+    qs = _qs(responses.calls[-1].request.url)
+    for key in ("search", "direction", "device", "call_type", "lead_status", "tracker_id",
+                "tags[]", "sort", "order", "time_zone"):
+        assert key not in qs
+
+
+@pytest.mark.parametrize("tool,path", [
+    ("call_stats", "calls/summary.json"),
+    ("call_timeseries", "calls/timeseries.json"),
+])
+@responses.activate
+def test_v130_stats_tools_forward_filters(server_with_mock_client, tool: str, path: str) -> None:
+    _v130_stub(path, {"total_results": {"total_calls": 1}})
+    getattr(server_mod, tool)(
+        days=7, answer_status="missed", direction="inbound", device="desktop",
+        lead_status="not_scored", first_time_callers=True, min_duration=30, max_duration=600,
+        tags=["x"], tracker_ids=["TRK123"], search="555", time_zone="America/Chicago",
+        fields="total_calls,leads",
+    )
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["answer_status"] == ["missed"]
+    assert qs["direction"] == ["inbound"]
+    assert qs["device"] == ["desktop"]
+    assert qs["lead_status"] == ["not_scored"]
+    assert qs["first_time_callers"] == ["true"]
+    assert qs["min_duration"] == ["30"]
+    assert qs["max_duration"] == ["600"]
+    assert qs["tags[]"] == ["x"]
+    assert qs["tracker_ids[]"] == ["TRK123"]
+    assert qs["search"] == ["555"]
+    assert qs["time_zone"] == ["America/Chicago"]
+    assert qs["fields"] == ["total_calls,leads"]
+
+
+@pytest.mark.parametrize("tool", ["call_stats", "call_timeseries"])
+@pytest.mark.parametrize("kwargs", [
+    {"min_duration": -1},
+    {"max_duration": True},
+    {"fields": "bogus_field"},
+    {"fields": "total_calls,bogus_field"},
+    {"tracker_ids": ["COM1"]},
+    {"first_time_callers": "yes"},
+    {"answer_status": "ringing"},
+    {"time_zone": "Nowhere/Land"},
+])
+@responses.activate
+def test_v130_stats_tools_reject_bad_filters(server_with_mock_client, tool: str, kwargs) -> None:
+    out = json.loads(getattr(server_mod, tool)(days=7, **kwargs))
+    assert out["error"] is True
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_v130_form_stats_group_by_and_filters(server_with_mock_client) -> None:
+    _v130_stub("forms/summary.json", {"total_results": {"total_forms": 3}, "grouped_results": []})
+    out = json.loads(server_mod.form_stats(
+        days=7, group_by="form_name", fields="total_forms,leads", lead_status="good_lead",
+        tags=["t"], time_zone="America/Denver",
+    ))
+    assert out.get("error") is not True
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["group_by"] == ["form_name"]
+    assert qs["fields"] == ["total_forms,leads"]
+    assert qs["lead_status"] == ["good_lead"]
+    assert qs["tags[]"] == ["t"]
+    assert qs["time_zone"] == ["America/Denver"]
+    assert json.loads(server_mod.form_stats(days=7, group_by="colour"))["error"] is True
+
+
+@responses.activate
+def test_v130_list_form_submissions_filters(server_with_mock_client) -> None:
+    _v130_stub("form_submissions.json", {"form_submissions": [], "page": 1, "total_pages": 1})
+    out = json.loads(server_mod.list_form_submissions(
+        days=7, lead_status="not_a_lead", tags=["q"], sort="submitted_at", order="asc",
+        time_zone="America/New_York",
+    ))
+    assert out.get("error") is not True
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["lead_status"] == ["not_a_lead"]
+    assert qs["tags[]"] == ["q"]
+    assert qs["sort"] == ["submitted_at"]
+    assert qs["order"] == ["asc"]
+    assert qs["time_zone"] == ["America/New_York"]
+    assert json.loads(server_mod.list_form_submissions(days=7, order="sideways"))["error"] is True
+
+
+@responses.activate
+def test_v130_list_users_is_paginated_and_filterable(server_with_mock_client) -> None:
+    _v130_stub("users.json", {"users": [], "page": 2, "total_pages": 2})
+    out = json.loads(server_mod.list_users(
+        company_id="COM123", search="steve", sort="email", order="asc", per_page=50, page=2,
+    ))
+    assert out.get("error") is not True
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["company_id"] == ["COM123"]
+    assert qs["search"] == ["steve"]
+    assert qs["sort"] == ["email"]
+    assert qs["order"] == ["asc"]
+    assert qs["per_page"] == ["50"]
+    assert qs["page"] == ["2"]
+    assert json.loads(server_mod.list_users(company_id="TRK1"))["error"] is True
+    assert json.loads(server_mod.list_users(order="down"))["error"] is True
+
+
+@responses.activate
+def test_v130_list_tags_status_and_level(server_with_mock_client) -> None:
+    _v130_stub("tags.json", {"tags": [], "page": 1, "total_pages": 1})
+    server_mod.list_tags(status="disabled", tag_level="account")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["status"] == ["disabled"]
+    assert qs["tag_level"] == ["account"]
+    assert json.loads(server_mod.list_tags(status="archived"))["error"] is True
+    assert json.loads(server_mod.list_tags(tag_level="global"))["error"] is True
+
+
+@responses.activate
+def test_v130_list_sms_threads_window_and_search(server_with_mock_client) -> None:
+    import datetime as _dt
+
+    _v130_stub("sms-threads.json", {"sms_threads": [], "page": 1, "total_pages": 1})
+    server_mod.list_sms_threads(days=7, search="412")
+    qs = _qs(responses.calls[-1].request.url)
+    assert "start_date" in qs and "end_date" in qs
+    assert qs["search"] == ["412"]
+    # A lone start_date is paired with today so CallRail gets both bounds.
+    server_mod.list_sms_threads(start_date="2026-09-01")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["start_date"] == ["2026-09-01"]
+    assert qs["end_date"] == [_dt.datetime.now(_dt.timezone.utc).date().isoformat()]
+    # No window at all keeps the old behaviour: no date params.
+    server_mod.list_sms_threads()
+    qs = _qs(responses.calls[-1].request.url)
+    assert "start_date" not in qs and "end_date" not in qs
+    assert json.loads(server_mod.list_sms_threads(days=-3))["error"] is True
+
+
+@responses.activate
+def test_v130_list_leads_sort_and_order(server_with_mock_client) -> None:
+    _v130_stub("leads.json", {"leads": [], "page": 1, "total_pages": 1})
+    server_mod.list_leads(sort="name", order="desc")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["sort"] == ["name"]
+    assert qs["order"] == ["desc"]
+    assert json.loads(server_mod.list_leads(sort="phone"))["error"] is True
+    assert len(responses.calls) == 2  # a.json + leads.json; the rejection never hit the network
+
+
+@responses.activate
+def test_v130_optional_fields_params_are_forwarded(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1", "numeric_id": 42}]},
+        status=200,
+    )
+    server_mod.list_accounts(fields="numeric_id")
+    assert _qs(responses.calls[-1].request.url)["fields"] == ["numeric_id"]
+
+    for path in ("companies.json", "companies/COM123.json", "trackers.json",
+                 "integrations.json", "integrations/42.json", "calls/CAL123/page_views.json"):
+        responses.add(responses.GET, f"https://api.callrail.com/v3/a/ACC1/{path}", json={}, status=200)
+
+    server_mod.list_companies(search="Acme", fields="verified_caller_ids")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["search"] == ["Acme"] and qs["fields"] == ["verified_caller_ids"]
+
+    server_mod.get_company("COM123", fields="verified_caller_ids")
+    assert _qs(responses.calls[-1].request.url)["fields"] == ["verified_caller_ids"]
+
+    server_mod.list_trackers(type="session", search="main", fields="campaign_name,swap_targets")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["type"] == ["session"] and qs["search"] == ["main"]
+    assert qs["fields"] == ["campaign_name,swap_targets"]
+    assert json.loads(server_mod.list_trackers(type="pool"))["error"] is True
+
+    server_mod.list_integrations("COM123", fields="signing_key")
+    assert _qs(responses.calls[-1].request.url)["fields"] == ["signing_key"]
+    server_mod.get_integration("42", fields="signing_key")
+    assert _qs(responses.calls[-1].request.url)["fields"] == ["signing_key"]
+
+    server_mod.get_call_page_views("CAL123", time_zone="America/Denver")
+    assert _qs(responses.calls[-1].request.url)["time_zone"] == ["America/Denver"]
+    assert json.loads(server_mod.get_call_page_views("CAL123", time_zone="Bad/Zone"))["error"] is True
+
+
+@responses.activate
+def test_v130_search_calls_by_number_narrows_server_side(server_with_mock_client) -> None:
+    _v130_stub("calls.json", {"calls": [], "page": 1, "total_pages": 1})
+    server_mod.search_calls_by_number("(412) 555-1234", days=7)
+    qs = _qs(responses.calls[-1].request.url)
+    assert "search" in qs
+    assert "4125551234".endswith(qs["search"][0])
+    assert qs["search"][0].isdigit()
+
+
+@responses.activate
+def test_v130_usage_summary_and_compare_periods_send_account_time_zone(server_with_mock_client) -> None:
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a.json",
+        json={"accounts": [{"id": "ACC1"}]},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"companies": [
+            {"id": "COM_A", "name": "A", "status": "active", "time_zone": "America/Los_Angeles"},
+        ], "total_pages": 1},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"trackers": [{"tracking_numbers": ["+14125551001"]}], "total_pages": 1},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"calls": [{"duration": 60}], "total_pages": 1},
+        status=200,
+    )
+    out = json.loads(server_mod.usage_summary(days=30))
+    assert out.get("error") is not True
+    call_requests = [c for c in responses.calls if "/calls.json" in c.request.url]
+    assert call_requests
+    assert all(_qs(c.request.url)["time_zone"] == ["America/Los_Angeles"] for c in call_requests)
+
+    responses.calls.reset()
+    out = json.loads(server_mod.compare_periods(days=30))
+    assert out.get("error") is not True
+    call_requests = [c for c in responses.calls if "/calls.json" in c.request.url]
+    assert len(call_requests) == 2
+    assert all(_qs(c.request.url)["time_zone"] == ["America/Los_Angeles"] for c in call_requests)
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0: write-tool contracts aligned with the documented request bodies
+# ---------------------------------------------------------------------------
+
+@responses.activate
+def test_v130_create_company_applies_toggles_with_follow_up_put(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"id": "COM_NEW", "name": "Acme"}, status=201,
+    )
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/companies/COM_NEW.json",
+        json={"id": "COM_NEW", "name": "Acme", "callscore_enabled": True, "form_capture": True},
+        status=200,
+    )
+    out = json.loads(server_mod.create_company(
+        name="Acme", callscore_enabled=True, form_capture=True, swap_exclude_jquery=False,
+    ))
+    assert json.loads(responses.calls[1].request.body) == {"name": "Acme", "time_zone": "America/New_York"}
+    assert json.loads(responses.calls[2].request.body) == {"callscore_enabled": True, "external_form_capture": True}
+    assert out["settings_applied"] == {"callscore_enabled": True, "external_form_capture": True}
+    assert any("swap_exclude_jquery" in w for w in out["api_warnings"])
+    out = json.loads(server_mod.create_company(name="Acme", lead_scoring_enabled=True))
+    assert out["error"] is True and "lead_scoring_enabled" in out["message"]
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+def test_v130_create_company_reports_failed_toggle_put(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/companies.json",
+        json={"id": "COM_NEW", "name": "Acme"}, status=201,
+    )
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/companies/COM_NEW.json",
+        json={"error": "nope"}, status=400,
+    )
+    out = json.loads(server_mod.create_company(name="Acme", callscribe_enabled=True))
+    assert out["id"] == "COM_NEW"
+    assert out["settings_not_applied"] == {"callscribe_enabled": True}
+    assert "update_company" in out["api_warnings"][0]
+
+
+@responses.activate
+def test_v130_update_company_documented_put_fields(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/companies/COM1.json",
+        json={"id": "COM1"}, status=200,
+    )
+    out = json.loads(server_mod.update_company(
+        company_id="COM1", swap_ppc_override=True, swap_landing_override="",
+        swap_cookie_duration=3, swap_cookie_duration_unit="months", keyword_spotting_enabled=True,
+    ))
+    assert json.loads(responses.calls[-1].request.body) == {
+        "swap_ppc_override": True,
+        "swap_landing_override": None,
+        "swap_cookie_duration": 3,
+        "swap_cookie_duration_unit": "months",
+    }
+    assert any("keyword_spotting_enabled" in w for w in out["api_warnings"])
+    assert json.loads(server_mod.update_company(company_id="COM1", lead_scoring_enabled=False))["error"] is True
+    assert json.loads(server_mod.update_company(
+        company_id="COM1", swap_cookie_duration=7, swap_cookie_duration_unit="months"))["error"] is True
+    assert json.loads(server_mod.update_company(company_id="COM1", swap_cookie_duration_unit="years"))["error"] is True
+    out = json.loads(server_mod.update_company(company_id="COM1", swap_exclude_jquery=True))
+    assert out["error"] is True and "no effect" in out["message"]
+    assert len(responses.calls) == 2
+
+
+def test_v130_update_user_rejects_role_and_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_user(user_id="USR_X", role="admin"))
+    assert out["error"] is True and "role" in out["message"]
+    out = json.loads(server_mod.update_user(user_id="USR_X", email="new@x.com"))
+    assert out["error"] is True and "password" in out["message"]
+
+
+@responses.activate
+def test_v130_update_form_submission_contract(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/form_submissions/FOR1.json",
+        json={"id": "FOR1"}, status=200,
+    )
+    server_mod.update_form_submission(
+        submission_id="FOR1", value=12.5, tags=["a"], append_tags=True, lead_status="good_lead",
+    )
+    assert json.loads(responses.calls[-1].request.body) == {
+        "tags": ["a"], "append_tags": True, "value": "12.50", "lead_status": "good_lead",
+    }
+    server_mod.update_form_submission(submission_id="FOR1", tags=["b"])
+    assert json.loads(responses.calls[-1].request.body) == {"tags": ["b"]}
+    out = json.loads(server_mod.update_form_submission(submission_id="FOR1", spam=True))
+    assert out["error"] is True and "spam" in out["message"]
+    assert json.loads(server_mod.update_form_submission(submission_id="FOR1", lead_status="unknown"))["error"] is True
+
+
+@responses.activate
+def test_v130_create_form_submission_session_id_and_lead_follow_up(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/form_submissions.json",
+        json={"id": "FOR_NEW"}, status=201,
+    )
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/form_submissions/FOR_NEW.json",
+        json={"id": "FOR_NEW", "note": "n"}, status=200,
+    )
+    out = json.loads(server_mod.create_form_submission(
+        company_id="COM1", form_url="https://x/contact",
+        form_data={"phone": "4125551234", "name": "Kevin"}, session_id="SES123",
+        note="n", value=7, lead_status="not_a_lead",
+    ))
+    assert json.loads(responses.calls[1].request.body) == {
+        "company_id": "COM1",
+        "form_url": "https://x/contact",
+        "form_data": {"phone": "4125551234", "name": "Kevin"},
+        "session_id": "SES123",
+    }
+    put_body = json.loads(responses.calls[2].request.body)
+    assert put_body == {"note": "n", "value": "7.00", "lead_status": "not_a_lead"}
+    assert out["lead_fields_applied"] == put_body
+    out = json.loads(server_mod.create_form_submission(
+        company_id="COM1", form_url="https://x", form_data={"a": 1}, referrer="(direct)",
+    ))
+    assert out["error"] is True
+    assert "referring_url" in out["message"] and "landing_page_url" in out["message"]
+    assert json.loads(server_mod.create_form_submission(
+        company_id="COM1", form_url="https://x", form_data={}, session_id="SES1"))["error"] is True
+    assert json.loads(server_mod.create_form_submission(
+        company_id="COM1", form_url="https://x", form_data={"a": 1}, session_id="COM1"))["error"] is True
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+def test_v130_update_sms_thread_value_string_and_lead_enum(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/sms-threads/THR1.json",
+        json={"id": "THR1"}, status=200,
+    )
+    server_mod.update_sms_thread(thread_id="THR1", value=5, lead_qualification="good_lead")
+    assert json.loads(responses.calls[-1].request.body) == {"value": "5.00", "lead_qualification": "good_lead"}
+    assert json.loads(server_mod.update_sms_thread(thread_id="THR1", lead_qualification="hot"))["error"] is True
+
+
+def test_v130_update_call_lead_status_enum(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    server_mod._client = None
+    out = json.loads(server_mod.update_call(call_id="CAL1", lead_status="unknown"))
+    assert out["error"] is True and "lead_status" in out["message"]
+
+
+@responses.activate
+def test_v130_outbound_call_agent_id(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/calls.json",
+        json={"id": "CAL_NEW"}, status=201,
+    )
+    server_mod.create_outbound_call(
+        caller_id="+14129548337", business_phone_number="+14125559999",
+        customer_phone_number="+14125551234", confirm_dialing=True, agent_id="USR123",
+    )
+    assert json.loads(responses.calls[-1].request.body)["agent_id"] == "USR123"
+    out = json.loads(server_mod.create_outbound_call(
+        caller_id="+14129548337", business_phone_number="+14125559999",
+        customer_phone_number="+14125551234", confirm_dialing=True, agent_id="COM1",
+    ))
+    assert out["error"] is True
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_v130_tag_levels_and_disable(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/tags.json",
+        json={"id": "1", "tag_level": "account"}, status=201,
+    )
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/tags/77.json",
+        json={"id": "77", "status": "disabled"}, status=200,
+    )
+    server_mod.create_tag(name="VIP", tag_level="account")
+    assert json.loads(responses.calls[-1].request.body) == {"name": "VIP", "tag_level": "account"}
+    assert json.loads(server_mod.create_tag(name="VIP", tag_level="account", company_id="COM1"))["error"] is True
+    out = json.loads(server_mod.create_tag(name="VIP"))
+    assert out["error"] is True and "company_id" in out["message"]
+    assert json.loads(server_mod.create_tag(name="VIP", tag_level="global", company_id="COM1"))["error"] is True
+    server_mod.update_tag(tag_id="77", disabled=True)
+    assert json.loads(responses.calls[-1].request.body) == {"disabled": "true"}
+    out = json.loads(server_mod.list_tags(tag_level="account", company_id="COM1"))
+    assert out["error"] is True
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+def test_v130_list_form_submissions_person_lead_and_sort_enum(server_with_mock_client) -> None:
+    _v130_stub("form_submissions.json", {"form_submissions": []})
+    server_mod.list_form_submissions(days=7, person_lead=True, sort="form_url")
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["person_lead"] == ["true"] and qs["sort"] == ["form_url"]
+    assert json.loads(server_mod.list_form_submissions(days=7, sort="phone"))["error"] is True
+
+
+@responses.activate
+def test_v130_get_call_transcript_uses_field_selection(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={
+            "id": "CAL1", "transcription": "Hello there",
+            "conversational_transcript": [{"speaker": "agent", "phrase": "Hello there", "start": 0.5}],
+            "sentiment": "positive", "call_summary": None,
+        },
+        status=200,
+    )
+    out = json.loads(server_mod.get_call_transcript(call_id="CAL1"))
+    assert out["transcription"] == "Hello there"
+    assert out["sentiment"] == "positive"
+    assert out["conversational_transcript"][0]["phrase"] == "Hello there"
+    fields = _qs(responses.calls[-1].request.url)["fields"][0].split(",")
+    assert {"transcription", "conversational_transcript", "sentiment", "keywords_spotted"} <= set(fields)
+    assert len(responses.calls) == 2  # no legacy fallback when the fields are populated
+
+
+@responses.activate
+def test_v130_get_call_transcript_falls_back_to_legacy_endpoint(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL2.json",
+        json={"id": "CAL2", "transcription": None, "conversational_transcript": None}, status=200,
+    )
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL2/transcription.json",
+        json={"transcription": [{"speaker": "agent", "text": "Hi"}]}, status=200,
+    )
+    out = json.loads(server_mod.get_call_transcript(call_id="CAL2"))
+    assert out["transcription"][0]["text"] == "Hi"
+
+
+@responses.activate
+def test_v130_update_tracker_refuses_to_clobber_advanced_call_flow(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1", "call_flow": {"type": "advanced", "uuid": "abc"}}, status=200,
+    )
+    out = json.loads(server_mod.update_tracker(tracker_id="TRK1", destination_number="+14129548337"))
+    assert out["error"] is True and "advanced" in out["message"]
+    assert len(responses.calls) == 2  # a.json + GET, no PUT
+
+
+@responses.activate
+def test_v130_update_tracker_recording_greeting_and_top_level_fields(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1", "call_flow": {
+            "type": "basic", "recording_enabled": False,
+            "destination_number": "+14129548337", "greeting_text": "Old",
+            "greeting_recording_url": None,
+        }},
+        status=200,
+    )
+    responses.add(
+        responses.PUT, "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1"}, status=200,
+    )
+    server_mod.update_tracker(
+        tracker_id="TRK1", recording_enabled=True,
+        greeting_recording_url="https://cdn.example.com/greet.mp3",
+        swap_targets=["412-555-1234"], campaign_name="Spring",
+    )
+    body = json.loads(responses.calls[-1].request.body)
+    assert body["call_flow"] == {
+        "type": "basic", "recording_enabled": True,
+        "destination_number": "+14129548337",
+        "greeting_text": None, "greeting_recording_url": "https://cdn.example.com/greet.mp3",
+    }
+    assert body["swap_targets"] == ["412-555-1234"]
+    assert body["campaign_name"] == "Spring"
+    assert "destination_number" not in body  # lives inside call_flow only
+    # Top-level-only changes do not need the GET.
+    responses.calls.reset()
+    server_mod.update_tracker(tracker_id="TRK1", swap_targets=["4125551234"])
+    assert [c.request.method for c in responses.calls] == ["PUT"]
+    assert json.loads(server_mod.update_tracker(
+        tracker_id="TRK1", greeting_text="a", greeting_recording_url="https://x/y.mp3"))["error"] is True
+    assert json.loads(server_mod.update_tracker(
+        tracker_id="TRK1", greeting_recording_url="ftp://x/y.mp3"))["error"] is True
+    assert json.loads(server_mod.update_tracker(tracker_id="TRK1", swap_targets=["abc"]))["error"] is True
+
+
+@responses.activate
+def test_v130_update_tracker_needs_destination_when_flow_unreadable(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1"}, status=200,
+    )
+    out = json.loads(server_mod.update_tracker(tracker_id="TRK1", greeting_text="Hi"))
+    assert out["error"] is True and "destination_number" in out["message"]
+
+
+@responses.activate
+def test_v130_create_tracker_source_object_extras(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.POST, "https://api.callrail.com/v3/a/ACC1/trackers.json",
+        json={"id": "TRK_NEW"}, status=201,
+    )
+    common = dict(
+        name="Google paid", company_id="COM1", destination_number="+14129548337",
+        confirm_billing=True, area_code="412",
+    )
+    server_mod.create_tracker(
+        source_type="search", search_engine="google", search_type="paid",
+        swap_targets=["412-555-1234"], campaign_name="Spring", **common,
+    )
+    body = json.loads(responses.calls[-1].request.body)
+    assert body["source"] == {"type": "search", "search_engine": "google", "search_type": "paid"}
+    assert body["swap_targets"] == ["412-555-1234"]
+    assert body["campaign_name"] == "Spring"
+    server_mod.create_tracker(source_type="landing_params", landing="promo=1", **common)
+    assert json.loads(responses.calls[-1].request.body)["source"] == {"type": "landing_params", "landing": "promo=1"}
+    server_mod.create_tracker(source_type="web_referrer", referrer="facebook.com", **common)
+    assert json.loads(responses.calls[-1].request.body)["source"] == {"type": "web_referrer", "referrer": "facebook.com"}
+    server_mod.create_tracker(**common)
+    body = json.loads(responses.calls[-1].request.body)
+    assert body["source"] == {"type": "all"} and "swap_targets" not in body and "campaign_name" not in body
+    n = len(responses.calls)
+    for bad in (
+        dict(source_type="search", search_engine="google"),
+        dict(source_type="search", search_engine="duckduckgo", search_type="all"),
+        dict(source_type="search", search_engine="google", search_type="display"),
+        dict(source_type="all", landing="x"),
+        dict(source_type="landing_url"),
+        dict(source_type="web_referrer", referrer=" "),
+        dict(swap_targets=["abc"]),
+        dict(campaign_name=""),
+    ):
+        out = json.loads(server_mod.create_tracker(**common, **bad))
+        assert out["error"] is True, bad
+    out = json.loads(server_mod.create_tracker(
+        type="session", pool_size=4, campaign_name="x", name="Pool", company_id="COM1",
+        destination_number="+14129548337", confirm_billing=True,
+    ))
+    assert out["error"] is True and "source trackers" in out["message"]
+    out = json.loads(server_mod.create_tracker(
+        type="session", pool_size=4, search_engine="google", name="Pool", company_id="COM1",
+        destination_number="+14129548337", confirm_billing=True,
+    ))
+    assert out["error"] is True
+    assert len(responses.calls) == n

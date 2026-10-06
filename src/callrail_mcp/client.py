@@ -108,7 +108,10 @@ def _safe_path(path: str) -> str:
             raise CallRailError(
                 f"Path segment {segment!r} contains a control character."
             )
-        out.append(quote(segment, safe=""))
+        try:
+            out.append(quote(segment, safe=""))
+        except UnicodeError as e:
+            raise CallRailError(f"Path segment {segment!r} cannot be URL-encoded: {e}") from e
     return "/".join(out)
 
 
@@ -166,6 +169,8 @@ class CallRailClient:
         max_retries: Max retries on 429 / 5xx before raising.
     """
 
+    _account_id: str | None = None
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -192,7 +197,9 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.2.2 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.3.0 (+https://github.com/pghdma/callrail-mcp)",
+                # Documented convention for third-party integrations.
+                "Request-From": "callrail-mcp",
             }
         )
 
@@ -291,8 +298,16 @@ class CallRailClient:
                 raise CallRailError(
                     f"Request to CallRail failed: {type(e).__name__}: {e}"
                 ) from e
+            except UnicodeError as e:
+                # A lone surrogate in a query value fails inside urllib's
+                # encoder, not in `requests`, so it is not a RequestException.
+                raise CallRailError(
+                    f"Request to CallRail could not be encoded: {e}"
+                ) from e
 
-            # CallRail responds 429 with Retry-After on rate limit (60 req/min/account).
+            # CallRail responds 429 with Retry-After on rate limit (documented:
+            # 1,000 requests/hour and 10,000/day; SMS send 150/hour; outbound
+            # calls 100/hour).
             # Safe to retry any method: server didn't accept the request.
             if resp.status_code == 429 and attempt < self.max_retries:
                 delay = self._parse_retry_after(resp.headers.get("Retry-After"), attempt)
@@ -307,6 +322,10 @@ class CallRailClient:
                 logger.warning("CallRail %d; retrying in %.1fs (attempt %d)", resp.status_code, delay, attempt + 1)
                 time.sleep(delay)
                 continue
+            # Let delete() tell a first-attempt 404 (really missing) from a
+            # 404 on a retry (the first attempt most likely succeeded and
+            # the response was lost).
+            resp.callrail_attempts = attempt + 1  # type: ignore[attr-defined]
             return resp
 
         # Should be unreachable; keeps type checker happy. Raise rather than
@@ -370,16 +389,36 @@ class CallRailClient:
         return self._parse(resp, "PUT", path)
 
     def delete(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """DELETE `path`. CallRail returns 204 on success."""
+        """DELETE `path`. CallRail returns 204 on success.
+
+        A 404 on a RETRIED attempt is reported as success with
+        `already_gone`: the first attempt almost certainly deleted the
+        resource and only the response was lost. A first-attempt 404 is
+        still an error."""
         resp = self._request("DELETE", path, params=params or {})
+        attempts = getattr(resp, "callrail_attempts", 1)
+        if resp.status_code == 404 and attempts > 1:
+            logger.warning(
+                "DELETE %s returned 404 on attempt %d; treating as already deleted.",
+                path, attempts,
+            )
+            return {"deleted": True, "already_gone": True, "attempts": attempts}
         return self._parse(resp, "DELETE", path)
 
     # ---- mid-level helpers ----
 
     def resolve_account_id(self, account_id: str | None = None) -> str:
-        """Return `account_id` if given, else fetch the first accessible account."""
+        """Return the account to operate on. Priority: the explicit argument,
+        then the CALLRAIL_ACCOUNT_ID environment variable, then the first
+        account the key can see. That lookup is cached on the client because
+        every tool call otherwise paid for an extra GET /a.json."""
         if account_id:
             return account_id
+        env_id = os.environ.get("CALLRAIL_ACCOUNT_ID", "").strip()
+        if env_id:
+            return env_id
+        if self._account_id is not None:
+            return self._account_id
         data = self.get("a.json")
         accounts = data.get("accounts") or data.get("agencies") or []
         # Defensive: a dict here would raise raw KeyError on accounts[0]
@@ -402,6 +441,7 @@ class CallRailClient:
             raise CallRailError(
                 f"Unexpected account.id type from CallRail: {type(first_id).__name__}"
             )
+        self._account_id = first_id
         return first_id
 
     def paginate(
