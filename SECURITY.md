@@ -6,8 +6,8 @@ Security fixes are applied to the latest minor release. Older releases are not m
 
 | Version | Supported |
 |---|---|
-| 1.2.x | ✅ |
-| < 1.2 | ❌ |
+| 1.3.x | ✅ |
+| < 1.3 | ❌ |
 
 ## Reporting a vulnerability
 
@@ -21,7 +21,7 @@ Instead, please email [s@pghdma.com](mailto:s@pghdma.com) with:
 - Your suggested severity rating
 - Optional: whether you'd like credit in the release notes
 
-You should receive an initial response within **72 hours**. If the issue is confirmed, we'll work on a fix and coordinate disclosure timing with you.
+You should receive an initial response within **72 hours**. If the issue is confirmed, I'll work on a fix and coordinate disclosure timing with you.
 
 ## Handling your CallRail API key
 

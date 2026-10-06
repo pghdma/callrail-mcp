@@ -9,15 +9,15 @@
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue)](https://modelcontextprotocol.io/)
 [![Available on CodeGuilds](https://img.shields.io/badge/Available_on-CodeGuilds-6366f1)](https://codeguilds.dev/packages/callrail-mcp)
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the [CallRail REST API v3](https://apidocs.callrail.com/) to any MCP-compatible client (Claude Code, Claude Desktop, Cursor, and others).
+A [Model Context Protocol](https://modelcontextprotocol.io/) server for the [CallRail REST API v3](https://apidocs.callrail.com/). Point Claude Code, Claude Desktop, Cursor, or any other MCP client at it and ask about your call tracking in plain English.
 
-Created by **[Steve Japalucci](https://github.com/pghdma)**, founder of [Pittsburgh Digital Marketing Agency (PGHDMA)](https://pghdma.com).
+I'm **[Steve Japalucci](https://github.com/pghdma)**. I run [Pittsburgh Digital Marketing Agency (PGHDMA)](https://pghdma.com), and I built this for my own client work. CallRail bills per tracking number and per minute across every client I manage, and I was tired of clicking through its reports to answer questions like "which client is burning my minutes this month". Now I ask Claude.
 
 Works with both major versions of the MCP Python SDK (1.x and 2.x).
 
-## What you can ask your assistant to do
+## What I use it for
 
-Once installed, any MCP-aware assistant can answer things like:
+These are the kinds of questions I ask it every week:
 
 **Reporting**
 
@@ -200,13 +200,13 @@ All tools accept `account_id` optionally; if omitted, the first accessible accou
 
 ### A note on filtering calls
 
-CallRail's `GET /calls.json` accepts `answer_status` (`answered`, `missed`, `voicemail`) but has **no** `answered` or `source` parameter. Earlier versions of this server forwarded both and CallRail silently ignored them, so results looked filtered but were not. Since v1.2.0:
+CallRail's `GET /calls.json` accepts `answer_status` (`answered`, `missed`, `voicemail`) but has **no** `answered` or `source` parameter. Earlier versions of this server forwarded both and CallRail silently ignored them, so results looked filtered but were not. I fixed that in v1.2.0:
 
 - `answer_status` is the documented filter and is applied server-side.
 - `answered` remains as a deprecated alias that translates to `answer_status`.
 - `source` is applied client-side, and the response includes a `source_filter` block stating exactly what was matched. For source breakdowns, prefer `call_stats(group_by="source")`.
 
-Two more things CallRail does that are easy to misread:
+Two more things CallRail does that bit me:
 
 - **Voicemail counts as answered on CallRail's side**, because its system picked up. Since v1.3.0 `call_summary`, `spam_detector`, `call_eligibility_check` and `bulk_update_calls` treat a call as answered only when a person answered (`answered` and not `voicemail`) and report voicemail separately. `answer_status=missed` includes voicemail.
 - **No date window means CallRail's `recent` range**, the previous 7 days including today, not all time. Windowed tools accept an IANA `time_zone` so day boundaries match the client's reporting zone, and `usage_summary` / `compare_periods` forward the account's zone automatically. Communication Records are retained for 25 months, so a window reaching past that returns an error asking for a narrower range.
@@ -231,7 +231,7 @@ Every tool declares MCP tool annotations: `readOnlyHint` on the 33 read tools, `
 
 CallRail offers an official hosted MCP server (documented at [apidocs.callrail.com](https://apidocs.callrail.com/#mcp)) using OAuth 2.0, with roughly 30 tools and a server URL provided by your CallRail account team. It is a good option if you want a fully managed remote server.
 
-This project is different on purpose:
+I built this one for a different job:
 
 | | callrail-mcp (this project) | Official CallRail MCP |
 |---|---|---|
@@ -242,17 +242,17 @@ This project is different on purpose:
 | Safety guards | `confirm_billing`, `confirm_dialing`, `dry_run` defaults, strict input validation | Not documented |
 | Source | MIT, open, auditable | Closed |
 
-Both speak the same underlying REST API v3. If you run an agency across multiple client accounts and want cost attribution and bulk workflows, this project is built for exactly that.
+Both speak the same underlying REST API v3. If you run an agency across many client accounts and want cost attribution and bulk workflows, this is the one I built for myself.
 
-A community TypeScript server also exists, `@kanopi/callrail-mcp` on npm (34 tools, stdio, API key auth). What sets this project apart is the agency tooling, the safety guards, and request contracts that are checked against CallRail's documentation and live responses (see the 1.3.0 entry in the CHANGELOG).
+A community TypeScript server also exists, `@kanopi/callrail-mcp` on npm (34 tools, stdio, API key auth). What I put into this one instead is the agency tooling, the safety guards, and request contracts checked against CallRail's documentation and live responses (see the 1.3.0 entry in the CHANGELOG).
 
 ## Out of scope (deliberately not implemented)
 
-The following CallRail capabilities are **not in this MCP**, by design. PRs are welcome if you have an account that supports them, or open an issue and we will prioritize.
+The following CallRail capabilities are **not in this MCP**, by design. PRs are welcome if you have an account that supports them, or open an issue and I will prioritize.
 
 ### Blocked by CallRail account permissions (returns 403)
 
-These endpoints exist but require account upgrades or additional permissions that a standard CallRail account does not have. Re-probed live 2026-10-05:
+These endpoints exist but need account upgrades or permissions that my standard CallRail account does not have. I re-probed them live on 2026-10-05:
 
 - **Send SMS/MMS** (`POST /text-messages.json`) needs A2P/TCR SMS registration. CallRail enforces TCPA-compliance keywords (STOP, CANCEL, UNSUBSCRIBE) on outbound text messages. MMS support was added by CallRail on 2026-05-05.
 - **Webhook integration create, update, delete** (`POST /integrations.json` with `type=Webhook`) needs Integration-Admin permission.
@@ -272,7 +272,7 @@ These have no API equivalent and are managed exclusively via the CallRail web UI
 
 ### Available but not yet shipped
 
-Readable on a standard account, judged low value so far: `summary_emails` CRUD, `companies/bulk_update.json` (external form capture only), and `form_submissions/ignored_fields.json`.
+Readable on a standard account, but I have judged them low value so far: `summary_emails` CRUD, `companies/bulk_update.json` (external form capture only), and `form_submissions/ignored_fields.json`.
 
 ## Examples
 
@@ -361,7 +361,7 @@ If you discover a security vulnerability, please report it privately per [SECURI
 
 ## Author
 
-**[Steve Japalucci](https://github.com/pghdma)**, founder of [Pittsburgh Digital Marketing Agency](https://pghdma.com). Reach out at [s@pghdma.com](mailto:s@pghdma.com).
+**[Steve Japalucci](https://github.com/pghdma)**, founder of [Pittsburgh Digital Marketing Agency](https://pghdma.com). I use this on my own client accounts every day, so bugs get noticed and fixed fast. Reach out at [s@pghdma.com](mailto:s@pghdma.com).
 
 ## License
 

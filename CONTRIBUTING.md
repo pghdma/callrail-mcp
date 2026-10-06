@@ -1,11 +1,11 @@
 # Contributing to callrail-mcp
 
-Thanks for your interest in improving this project! Contributions of all kinds are welcome, bug reports, feature ideas, documentation, and code.
+Thanks for wanting to improve this. I take bug reports, feature ideas, documentation fixes, and code.
 
 ## Ground rules
 
 - Be respectful. This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
-- Discuss non-trivial changes in an issue first so we can agree on scope before you invest time.
+- Discuss non-trivial changes in an issue first so we agree on scope before you spend time on it.
 - Keep pull requests focused. Small, single-purpose PRs are easier to review and land.
 
 ## Dev setup
@@ -47,9 +47,9 @@ CI runs `ruff check`, `mypy --strict`, `bandit`, and `pytest -W error` on every 
 ## Adding a new CallRail endpoint
 
 1. Open `src/callrail_mcp/server.py`.
-2. Add a `@mcp.tool()`-decorated function. Follow the docstring + typing conventions in existing tools.
+2. Add a function decorated with `@mcp.tool(annotations=...)`, using one of `_READ`, `_CREATE`, `_UPDATE`, `_DELETE`, `_BULK_WRITE` or `_DIAL`, and follow the docstring and typing conventions in existing tools. Check the request-body table in CallRail's docs for the endpoint; the response-field table is not the contract.
 3. Reuse `client.get()` / `client.paginate()`: don't hit `requests` directly.
-4. Add tests in `tests/test_client.py` (if the change touches the client) or a new `tests/test_tools.py` (for server-level behavior).
+4. Add tests in `tests/test_client.py` (if the change touches the client) or `tests/test_server.py` (for tool behavior). Every test stubs HTTP with `responses`; nothing hits the real API.
 5. Update `README.md`'s tool table.
 6. Update `CHANGELOG.md` under `## [Unreleased]`.
 
@@ -69,13 +69,13 @@ python -c "from callrail_mcp.client import CallRailClient; print(CallRailClient(
 
 ## Releases
 
-Maintainers cut releases via GitHub. The flow:
+I cut releases from GitHub. The flow:
 
 1. Bump the version in `pyproject.toml`, `src/callrail_mcp/__init__.py`, the User-Agent string in `src/callrail_mcp/client.py`, and both `version` fields in `server.json`.
 2. Update `CHANGELOG.md`: move items from `## [Unreleased]` under a new `## [x.y.z] - YYYY-MM-DD` heading.
-3. Commit: `chore: release x.y.z`.
-4. Tag: `git tag vX.Y.Z && git push --tags`.
-5. Create a GitHub Release from the tag, the `publish.yml` workflow will build and publish to PyPI via trusted publishing.
+3. Commit and push to `main`.
+4. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+5. Create a GitHub Release from the tag. The `publish.yml` workflow checks that every version field matches the tag, publishes to PyPI via trusted publishing, and then publishes `server.json` to the MCP registry with GitHub OIDC. There are no manual steps after the release is created.
 
 ## Reporting bugs
 

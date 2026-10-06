@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed: docs
+
+- README, CONTRIBUTING and SECURITY now read in the first person, the way
+  the rest of the project is written. No behavior changes.
+- CONTRIBUTING describes the current release flow (version guard, PyPI,
+  then the MCP registry, all from the release workflow) and points new
+  tool tests at `tests/test_server.py`.
+- SECURITY lists 1.3.x as the supported line.
+
 ## [1.3.0] - 2026-10-05
 
 Health sweep. The whole tool surface was re-read against CallRail's
