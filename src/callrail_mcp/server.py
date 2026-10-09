@@ -1955,6 +1955,17 @@ def get_call_transcript(call_id: str, account_id: str | None = None) -> str:
             if key in call:
                 out[key] = call[key]
         return _ok(out)
+    # CallRail explains plan-gated omissions in a `notice` field rather than
+    # in the transcript itself (confirmed live 2026-10-09). Pass it through.
+    notice = call.get("notice")
+    if isinstance(notice, str) and notice.strip():
+        return json.dumps({
+            "error": True,
+            "status": 403,
+            "message": notice.strip(),
+            "notice": notice.strip(),
+            "hint": "CallRail omitted the transcript because of the account's plan, not because the call has none.",
+        }, indent=2)
     # The documented fields were empty. The older per-call endpoint is no
     # longer documented (it 404s on current accounts) but is cheap to try.
     try:

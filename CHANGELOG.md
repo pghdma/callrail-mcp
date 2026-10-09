@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-09
+
+### Fixed
+
+- `get_call_transcript` now passes through CallRail's `notice` field. When
+  the account lacks Premium Conversation Intelligence, CallRail returns the
+  call with the transcript omitted and a notice explaining why; the tool
+  reports that notice instead of guessing between "no transcript" and "plan
+  gated", and skips the legacy endpoint.
+
 ### Changed: docs
 
 - README, CONTRIBUTING and SECURITY now read in the first person, the way

@@ -5044,3 +5044,16 @@ def test_v130_create_tracker_source_object_extras(server_with_mock_client) -> No
     ))
     assert out["error"] is True
     assert len(responses.calls) == n
+
+
+@responses.activate
+def test_v131_get_call_transcript_surfaces_plan_notice(server_with_mock_client) -> None:
+    _stub_account()
+    msg = "The Premium Conversation Intelligence plan is required to access call transcripts via the API; the requested transcript was omitted."
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL9.json",
+        json={"id": "CAL9", "transcription": None, "notice": msg}, status=200,
+    )
+    out = json.loads(server_mod.get_call_transcript(call_id="CAL9"))
+    assert out["error"] is True and out["notice"] == msg and out["status"] == 403
+    assert len(responses.calls) == 2  # no legacy fallback once CallRail explains itself

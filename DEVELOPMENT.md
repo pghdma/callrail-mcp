@@ -7,7 +7,7 @@ Repo: https://github.com/pghdma/callrail-mcp. MIT, public.
 ## Where things live
 
 - **Source:** `src/callrail_mcp/` (`client.py`, `server.py`, `__init__.py`, `__main__.py`)
-- **Tests:** `tests/`: 488 passing, uses `responses` + `hypothesis`. No real API hits in CI.
+- **Tests:** `tests/`: 489 passing, uses `responses` + `hypothesis`. No real API hits in CI.
 - **Local dev venv:** `.venv/` (created via `python -m venv .venv && pip install -e ".[dev]"`).
 - **pipx install:** `~/.local/bin/callrail-mcp` → points to `~/.local/pipx/venvs/callrail-mcp/`.
 - **API key:** `~/.config/callrail/api-key.txt` (mode 600). Also honored: `CALLRAIL_API_KEY` env, `CALLRAIL_API_KEY_FILE` env.
@@ -135,7 +135,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.3.0
+## Current version: 1.3.1
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0`: initial 12 read tools
@@ -165,7 +165,7 @@ See `CHANGELOG.md` for full history. Highlights:
 - `1.1.0` to `1.2.2`: leads, SMS threads, server-side analytics, filter corrections, house style, automated PyPI + registry publishing.
 - `1.3.0`: **Health sweep against the current docs and live API.** Voicemail counted separately from answered; 40+ documented filters and `fields` options wired through; request contracts corrected for companies, users, form submissions, trackers, tags and notifications; call-flow merge on `update_tracker`; tool annotations; `CALLRAIL_ACCOUNT_ID`.
 
-**Tests: 488 passing. 57 tools total. mypy --strict + ruff + pytest -W error + bandit all clean.**
+**Tests: 489 passing. 57 tools total. mypy --strict + ruff + pytest -W error + bandit all clean.**
 
 ## Future work (deferred, see "API coverage limits" above)
 
