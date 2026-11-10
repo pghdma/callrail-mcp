@@ -125,7 +125,7 @@ The server speaks standard MCP stdio. Any client that supports stdio MCP servers
 | `get_tracker` | Full detail for one tracker |
 | `list_calls` | Paginated call list. Filter by company, date window, `answer_status`, `direction`, `device`, `call_type`, `lead_status`, `tracker_id`, `tags` and free-text `search`, with `sort`/`order` and an IANA `time_zone` |
 | `get_call` | Full detail for a specific call |
-| `call_summary` | Aggregate stats (total, answered by a person, voicemail, missed, by source, duration) for a window |
+| `call_summary` | Aggregate stats (total, answered by a person, voicemail, missed, by disposition, by source, duration) for a window |
 | `list_form_submissions` | CallRail Form Tracking submissions. Filter by `lead_status`, `tags` and `person_lead`; sort by `submitted_at` or `form_url` |
 | `list_text_messages` | SMS conversations |
 | `list_users` | Account users, paginated. Filter by `company_id`, `search` names and emails, sort by `email` or `created_at` |
@@ -208,7 +208,7 @@ CallRail's `GET /calls.json` accepts `answer_status` (`answered`, `missed`, `voi
 
 Two more things CallRail does that bit me:
 
-- **Voicemail counts as answered on CallRail's side**, because its system picked up. Since v1.3.0 `call_summary`, `spam_detector`, `call_eligibility_check` and `bulk_update_calls` treat a call as answered only when a person answered (`answered` and not `voicemail`) and report voicemail separately. `answer_status=missed` includes voicemail.
+- **Voicemail counts as answered on CallRail's side**, because its system picked up. Since v1.3.0 `call_summary`, `spam_detector`, `call_eligibility_check` and `bulk_update_calls` treat a call as answered only when a person answered (`answered` and not `voicemail`) and report voicemail separately. Since v1.3.2 they use CallRail's `call_disposition` field when it is present, which also separates abandoned and Voice Assist calls. `answer_status=missed` includes voicemail.
 - **No date window means CallRail's `recent` range**, the previous 7 days including today, not all time. Windowed tools accept an IANA `time_zone` so day boundaries match the client's reporting zone, and `usage_summary` / `compare_periods` forward the account's zone automatically. Communication Records are retained for 25 months, so a window reaching past that returns an error asking for a narrower range.
 
 Validation is strict throughout: phone-number format, area code (`^\d{3}$`), session pool size (CallRail's 4 to 50 range), name, whisper, and greeting length caps, and a 12-value source-type enum.
@@ -221,7 +221,7 @@ The CallRail API returns a lean default payload. Ask for more fields on `list_ca
 fields=company_name,source_name,keywords,landing_page_url,device_type,first_call,value,tags,note,gclid,fbclid,utm_source,utm_medium,utm_campaign,utm_content,utm_term,referrer_domain
 ```
 
-Conversation-intelligence and attribution fields are also available by name: `lead_status`, `sentiment`, `call_summary`, `call_highlights`, `keywords_spotted`, `transcription`, `conversational_transcript`, `speaker_percent`, `milestones`, `timeline_url`, `msclkid`, `prior_calls`, `total_calls`, `person_id`. See the [CallRail API docs](https://apidocs.callrail.com/) for the full field catalog per resource.
+Conversation-intelligence and attribution fields are also available by name: `call_disposition`, `lead_status`, `lead_score`, `sentiment`, `call_summary`, `call_highlights`, `keywords_spotted`, `transcription`, `conversational_transcript`, `speaker_percent`, `milestones`, `timeline_url`, `msclkid`, `prior_calls`, `total_calls`, `person_id`. See the [CallRail API docs](https://apidocs.callrail.com/) for the full field catalog per resource.
 
 ### Tool annotations
 

@@ -5057,3 +5057,154 @@ def test_v131_get_call_transcript_surfaces_plan_notice(server_with_mock_client) 
     out = json.loads(server_mod.get_call_transcript(call_id="CAL9"))
     assert out["error"] is True and out["notice"] == msg and out["status"] == 403
     assert len(responses.calls) == 2  # no legacy fallback once CallRail explains itself
+
+
+# ---------------------------------------------------------------------------
+# v1.3.2: call_disposition and the call_type values CallRail added
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("call,expected", [
+    ({"call_disposition": "answered", "answered": True, "voicemail": False}, True),
+    ({"call_disposition": "voicemail", "answered": True, "voicemail": True}, False),
+    ({"call_disposition": "voicemail_abandoned", "answered": True, "voicemail": False}, False),
+    ({"call_disposition": "voice_assist", "answered": True, "voicemail": False}, False),
+    ({"call_disposition": "abandoned", "answered": False}, False),
+    ({"call_disposition": "missed", "answered": False}, False),
+    ({"call_disposition": "outbound", "answered": True, "voicemail": False}, True),
+    ({"call_disposition": None, "answered": True, "voicemail": False}, True),
+    ({"answered": True, "voicemail": True}, False),
+])
+def test_v132_human_answered_prefers_call_disposition(call, expected) -> None:
+    assert server_mod._human_answered(call) is expected
+
+
+@responses.activate
+def test_v132_call_summary_reports_dispositions(server_with_mock_client) -> None:
+    _v130_stub("calls.json", {"total_pages": 1, "calls": [
+        {"call_disposition": "answered", "answered": True, "voicemail": False, "duration": 60},
+        {"call_disposition": "voice_assist", "answered": True, "voicemail": False, "duration": 30},
+        {"call_disposition": "abandoned", "answered": False, "voicemail": False, "duration": 3},
+        {"call_disposition": "voicemail", "answered": True, "voicemail": True, "duration": 20},
+        {"answered": True, "voicemail": False, "duration": 10},
+    ]})
+    out = json.loads(server_mod.call_summary(days=7))
+    assert "call_disposition" in _qs(responses.calls[-1].request.url)["fields"][0]
+    assert out["answered"] == 2 and out["missed"] == 3 and out["voicemail"] == 1
+    assert out["by_disposition"] == {
+        "answered": 1, "voice_assist": 1, "abandoned": 1, "voicemail": 1, "(none)": 1,
+    }
+
+
+@pytest.mark.parametrize("value", ["abandoned", "voice_assist", "all"])
+@responses.activate
+def test_v132_list_calls_accepts_new_call_types(server_with_mock_client, value: str) -> None:
+    _v130_stub("calls.json", {"calls": [], "total_pages": 1})
+    out = json.loads(server_mod.list_calls(days=7, call_type=value, answer_status="all"))
+    assert out.get("error") is not True
+    qs = _qs(responses.calls[-1].request.url)
+    assert qs["call_type"] == [value] and qs["answer_status"] == ["all"]
+
+
+# ---------------------------------------------------------------------------
+# v1.3.2: regressions from the November review
+# ---------------------------------------------------------------------------
+
+def test_v132_numeric_ids_pass_the_mcp_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clients send numeric ids as JSON numbers; the tool schema must allow it."""
+    monkeypatch.setenv("CALLRAIL_API_KEY", "test-key")
+    tools = {t.name: t for t in server_mod.mcp._tool_manager.list_tools()}
+    for name, param in (
+        ("get_tag", "tag_id"), ("update_tag", "tag_id"), ("delete_tag", "tag_id"),
+        ("get_integration", "integration_id"), ("update_notification", "notification_id"),
+        ("delete_notification", "notification_id"), ("search_calls_by_number", "phone_number"),
+    ):
+        schema = json.dumps(tools[name].parameters["properties"][param])
+        assert "integer" in schema and "string" in schema, (name, schema)
+
+
+@responses.activate
+def test_v132_numeric_ids_reach_callrail(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/tags/123.json", json={"id": 123}, status=200)
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/integrations/42.json", json={"id": 42}, status=200)
+    responses.add(responses.PUT, "https://api.callrail.com/v3/a/ACC1/notifications/7.json", json={"id": 7}, status=200)
+    assert json.loads(server_mod.get_tag(123))["id"] == 123
+    assert json.loads(server_mod.get_integration(42))["id"] == 42
+    out = json.loads(server_mod.update_notification(7, send_email=False, name="x", email="a@b.co"))
+    assert json.loads(responses.calls[-1].request.body) == {"send_email": False}
+    assert "name, email" in out["api_warnings"][0]
+    assert json.loads(server_mod.get_tag(True))["error"] is True
+
+
+@responses.activate
+def test_v132_transcript_keeps_summary_when_text_is_missing(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL1.json",
+        json={"id": "CAL1", "transcription": None, "call_summary": "Asked for a roof quote.", "sentiment": "positive"},
+        status=200,
+    )
+    responses.add(responses.GET, "https://api.callrail.com/v3/a/ACC1/calls/CAL1/transcription.json", json={"error": "x"}, status=500)
+    out = json.loads(server_mod.get_call_transcript("CAL1"))
+    assert out["status"] == 404  # the legacy endpoint's 500 does not mask the documented result
+    assert out["available"] == {"call_summary": "Asked for a roof quote.", "sentiment": "positive"}
+
+
+def test_v132_account_tz_falls_back_when_not_iana() -> None:
+    assert server_mod._pick_account_tz([{"time_zone": "Eastern Time (US & Canada)"}]) == "UTC"
+    assert server_mod._pick_account_tz([{"time_zone": "AEST"}]) == "UTC"
+    assert server_mod._pick_account_tz([{"time_zone": "America/Detroit"}]) == "America/Detroit"
+    assert server_mod._pick_account_tz([{"time_zone": "EST"}]) == "America/New_York"
+
+
+@pytest.mark.parametrize("tz,ok", [
+    ("America/New_York", True), ("UTC", True), ("Etc/GMT+5", True),
+    ("EST", False), ("Factory", False), ("america/new_york", False), ("Not/AZone", False),
+])
+def test_v132_time_zone_validator_wants_canonical_iana(tz: str, ok: bool) -> None:
+    assert server_mod._validate_time_zone(tz)[0] is ok
+
+
+@responses.activate
+def test_v132_small_guards(server_with_mock_client) -> None:
+    assert json.loads(server_mod.list_sms_threads(end_date="2026-10-01"))["error"] is True
+    assert json.loads(server_mod.list_sms_threads(start_date="2999-01-01"))["error"] is True
+    assert json.loads(server_mod.create_company(name="A", time_zone="Not/AZone"))["error"] is True
+    assert json.loads(server_mod.update_company(company_id="COM1", time_zone="EST"))["error"] is True
+    assert json.loads(server_mod.list_calls(days=7, source=123))["error"] is True  # type: ignore[arg-type]
+    out = json.loads(server_mod.create_tracker(
+        name="T", company_id="COM1", destination_number="+14129548337", area_code="412",
+        confirm_billing="false",  # type: ignore[arg-type]
+    ))
+    assert out["error"] is True and "confirm_billing" in out["message"]
+    out = json.loads(server_mod.create_outbound_call(
+        caller_id="+14129548337", business_phone_number="+14125559999",
+        customer_phone_number="+14125551234", confirm_dialing="yes",  # type: ignore[arg-type]
+    ))
+    assert out["error"] is True and "confirm_dialing" in out["message"]
+    out = json.loads(server_mod.create_form_submission(
+        company_id="COM1", form_url="https://x", form_data={"a": 1}, session_id="SES1", referrer="(direct)",
+    ))
+    assert out["error"] is True and "not both" in out["message"]
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_v132_follow_up_put_with_empty_body_keeps_the_new_id(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(responses.POST, "https://api.callrail.com/v3/a/ACC1/companies.json", json={"id": "COM9", "name": "A"}, status=201)
+    responses.add(responses.PUT, "https://api.callrail.com/v3/a/ACC1/companies/COM9.json", status=204)
+    out = json.loads(server_mod.create_company(name="A", callscribe_enabled=True))
+    assert out["id"] == "COM9" and out["settings_applied"] == {"callscribe_enabled": True}
+
+
+@responses.activate
+def test_v132_untyped_advanced_call_flow_is_not_flattened(server_with_mock_client) -> None:
+    _stub_account()
+    responses.add(
+        responses.GET, "https://api.callrail.com/v3/a/ACC1/trackers/TRK1.json",
+        json={"id": "TRK1", "call_flow": {"uuid": "u-1", "name": "Main IVR"}}, status=200,
+    )
+    out = json.loads(server_mod.update_tracker(tracker_id="TRK1", destination_number="+14129548337"))
+    assert out["error"] is True
+    assert [c.request.method for c in responses.calls] == ["GET", "GET"]

@@ -7,7 +7,7 @@ Repo: https://github.com/pghdma/callrail-mcp. MIT, public.
 ## Where things live
 
 - **Source:** `src/callrail_mcp/` (`client.py`, `server.py`, `__init__.py`, `__main__.py`)
-- **Tests:** `tests/`: 489 passing, uses `responses` + `hypothesis`. No real API hits in CI.
+- **Tests:** `tests/`: 517 passing, uses `responses` + `hypothesis`. No real API hits in CI.
 - **Local dev venv:** `.venv/` (created via `python -m venv .venv && pip install -e ".[dev]"`).
 - **pipx install:** `~/.local/bin/callrail-mcp` → points to `~/.local/pipx/venvs/callrail-mcp/`.
 - **API key:** `~/.config/callrail/api-key.txt` (mode 600). Also honored: `CALLRAIL_API_KEY` env, `CALLRAIL_API_KEY_FILE` env.
@@ -48,7 +48,7 @@ Restart your MCP client after `pipx install --force` for new tools to appear in 
 
 ## API coverage limits, endpoints we deliberately did NOT ship
 
-Probed live 2026-04-24, re-probed 2026-07-03 and 2026-10-05. These
+Probed live 2026-04-24, re-probed 2026-07-03, 2026-10-05 and 2026-11-10. These
 endpoints are documented but return **403 "You do not have permission"**
 on this account. Re-attempt if account/plan is upgraded:
 
@@ -121,6 +121,9 @@ plans):
 - `/calls/{id}/transcription.json` is undocumented and 404s. Transcript data comes from field selection on `/calls/{id}.json` (transcription, conversational_transcript, call_summary, call_highlights, keywords_spotted, sentiment, speaker_percent).
 - Rate limits: 1,000/hour and 10,000/day for general requests (SMS send 150/hour, outbound call 100/hour). Not 60/minute.
 - Recording URLs: non-HIPAA links are good for at least 24 hours (not guaranteed forever); HIPAA accounts get a temporary URL that expires in about 24 hours.
+- `call_disposition` (field selection on calls; Sean McCrohan at CallRail pointed us at it, 2026-10) is becoming the explicit exclusive state: answered, missed, abandoned, voicemail, voicemail_abandoned, voice_assist. Live 2026-11-10 it mirrors `call_type` and returns "outbound" for outbound calls; the docs say that will become null. `_human_answered()` prefers it. `notice` is NOT a selectable field; it appears on its own when a transcript is plan-gated.
+- `call_type` filter enum per the API's own 400: all, first_call, missed, abandoned, voicemails, inbound, outbound, voice_assist. `answer_status` also takes `all`. An unknown filter NAME (for example `disposition=x`) is silently ignored with a 200.
+- Response headers carry `X-Rate-Limit-Hourly-Used/Allowed` and `X-Rate-Limit-Daily-Used/Allowed` (undocumented).
 - `search` on GET /calls matches any fragment of customer_number as well as names, notes, source and the business number; `search_calls_by_number` uses it to narrow, then matches the suffix exactly.
 
 ## Validation guards added across versions (don't re-discover these)
@@ -135,7 +138,7 @@ plans):
 - `_err()` truncates body to 500 chars + decodes bytes defensively.
 - API key file: `$VAR` expansion, mode-600 warning (skipped on Windows).
 
-## Current version: 1.3.1
+## Current version: 1.3.2
 
 See `CHANGELOG.md` for full history. Highlights:
 - `0.1.0`: initial 12 read tools
@@ -163,9 +166,10 @@ See `CHANGELOG.md` for full history. Highlights:
 - `0.7.0`: Final API parity push: 8 more tools (get_tag, list/get_integration, create_form_submission, create_outbound_call w/ confirm_dialing safety, list/create/update/delete_notification). API coverage 75% → ~85%
 - `1.0.0`: **First stable release published to PyPI.** Locked feature surface; all remaining gaps are documented as out-of-scope (account-permission-gated or UI-only on standard CallRail plans).
 - `1.1.0` to `1.2.2`: leads, SMS threads, server-side analytics, filter corrections, house style, automated PyPI + registry publishing.
+- `1.3.2`: second sweep (2026-11-10): `call_disposition`, new call types, nine review fixes (429-then-404 delete, numeric ids at the schema, transcript `available`, non-IANA time zones).
 - `1.3.0`: **Health sweep against the current docs and live API.** Voicemail counted separately from answered; 40+ documented filters and `fields` options wired through; request contracts corrected for companies, users, form submissions, trackers, tags and notifications; call-flow merge on `update_tracker`; tool annotations; `CALLRAIL_ACCOUNT_ID`.
 
-**Tests: 489 passing. 57 tools total. mypy --strict + ruff + pytest -W error + bandit all clean.**
+**Tests: 517 passing. 57 tools total. mypy --strict + ruff + pytest -W error + bandit all clean.**
 
 ## Future work (deferred, see "API coverage limits" above)
 

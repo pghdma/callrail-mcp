@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-10
+
+Second health sweep. CallRail's docs list no new endpoints since May, but
+the live API has moved, and an independent review of the 1.3.x code found
+nine defects. Every one was reproduced before it was fixed.
+
+### Added
+
+- **`call_disposition`.** CallRail is moving to one explicit state per
+  call (answered, missed, abandoned, voicemail, voicemail_abandoned,
+  voice_assist). The answered-by-a-person rule now uses it when present
+  and falls back to `answered` and `voicemail` otherwise, so Voice Assist
+  calls are no longer counted as answered by a person. `call_summary`
+  reports `by_disposition`.
+- `call_type` accepts `abandoned`, `voice_assist` and `all`, and
+  `answer_status` accepts `all`, matching the values the API itself lists.
+
+### Fixed
+
+- A DELETE that was only rate limited (429) and then got a 404 was
+  reported as deleted. `already_gone` now requires an earlier attempt that
+  could have been processed (a 5xx or a dropped connection).
+- Numeric ids sent as JSON numbers were rejected by the tool schema for
+  tags, integrations, notifications and `search_calls_by_number`.
+- `get_call_transcript` threw away the call summary, highlights and
+  sentiment when the transcript text was missing, and let an error from
+  the undocumented legacy endpoint replace the real answer. Those fields
+  now come back under `available`.
+- `update_notification` dropped `name` and `email` without saying so; it
+  now reports them under `api_warnings`, and its docstring lists the
+  alert types CallRail accepts.
+- A company time zone that is not an IANA name made every per-company
+  request in `usage_summary` and `compare_periods` fail; it now falls back
+  to UTC with a warning. The time zone validator accepts canonical IANA
+  names only, and `create_company` / `update_company` use it.
+- `list_sms_threads` rejects a lone `end_date` and a future lone
+  `start_date` instead of sending half a window.
+- `create_company` and `create_form_submission` keep the new id when the
+  follow-up update returns an empty body.
+- `update_tracker` refuses a call flow that has no `type` but carries
+  advanced-flow keys, instead of replacing it with a basic flow.
+- `confirm_billing` and `confirm_dialing` must be exactly `True`; a
+  non-string `source` is rejected; `create_form_submission` rejects
+  `session_id` combined with the referrer fields.
+
 ## [1.3.1] - 2026-10-09
 
 ### Fixed

@@ -197,7 +197,7 @@ class CallRailClient:
             {
                 "Authorization": f"Token token={self.api_key}",
                 "Accept": "application/json",
-                "User-Agent": "callrail-mcp/1.3.1 (+https://github.com/pghdma/callrail-mcp)",
+                "User-Agent": "callrail-mcp/1.3.2 (+https://github.com/pghdma/callrail-mcp)",
                 # Documented convention for third-party integrations.
                 "Request-From": "callrail-mcp",
             }
@@ -273,11 +273,16 @@ class CallRailClient:
 
         last_exc: BaseException | None = None
         resp: Response | None = None
+        # True once an attempt may have reached CallRail and been processed
+        # (a 5xx, or a network error after the request was sent). A 429 is
+        # a refusal, so it never counts.
+        maybe_processed = False
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.session.request(method, url, **kwargs)
             except RETRYABLE_NETWORK_ERRORS as e:
                 last_exc = e
+                maybe_processed = True
                 # Network errors: only retry for idempotent methods. A
                 # connection-reset on a POST might mean the server already
                 # processed the create; retrying would duplicate.
@@ -318,6 +323,7 @@ class CallRailClient:
             # mean the server processed the request but the response was
             # lost; retrying would create a duplicate.
             if 500 <= resp.status_code < 600 and attempt < self.max_retries and is_idempotent:
+                maybe_processed = True
                 delay = self._clamp_delay(float(2 ** attempt))
                 logger.warning("CallRail %d; retrying in %.1fs (attempt %d)", resp.status_code, delay, attempt + 1)
                 time.sleep(delay)
@@ -326,6 +332,7 @@ class CallRailClient:
             # 404 on a retry (the first attempt most likely succeeded and
             # the response was lost).
             resp.callrail_attempts = attempt + 1  # type: ignore[attr-defined]
+            resp.callrail_maybe_processed = maybe_processed  # type: ignore[attr-defined]
             return resp
 
         # Should be unreachable; keeps type checker happy. Raise rather than
@@ -391,13 +398,14 @@ class CallRailClient:
     def delete(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """DELETE `path`. CallRail returns 204 on success.
 
-        A 404 on a RETRIED attempt is reported as success with
-        `already_gone`: the first attempt almost certainly deleted the
-        resource and only the response was lost. A first-attempt 404 is
-        still an error."""
+        A 404 after an earlier attempt that may have been processed (a 5xx
+        or a dropped connection) is reported as success with `already_gone`:
+        that attempt almost certainly deleted the resource and only the
+        response was lost. A first-attempt 404, or a 404 after nothing but
+        429 refusals, is still an error."""
         resp = self._request("DELETE", path, params=params or {})
         attempts = getattr(resp, "callrail_attempts", 1)
-        if resp.status_code == 404 and attempts > 1:
+        if resp.status_code == 404 and getattr(resp, "callrail_maybe_processed", False):
             logger.warning(
                 "DELETE %s returned 404 on attempt %d; treating as already deleted.",
                 path, attempts,

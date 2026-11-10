@@ -493,3 +493,15 @@ def test_v130_delete_404_on_first_attempt_is_still_an_error(monkeypatch) -> None
 def test_v130_request_from_header(monkeypatch) -> None:
     c = _fresh(monkeypatch)
     assert c.session.headers["Request-From"] == "callrail-mcp"
+
+
+@responses.activate
+def test_v132_delete_404_after_only_429_is_still_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 429 is a refusal: nothing was deleted, so the 404 is real."""
+    c = _fresh(monkeypatch, 1)
+    url = "https://api.callrail.com/v3/a/ACC1/trackers/TRKnope.json"
+    responses.add(responses.DELETE, url, status=429, headers={"Retry-After": "0"})
+    responses.add(responses.DELETE, url, json={"error": "Not found"}, status=404)
+    with pytest.raises(CallRailError) as exc:
+        c.delete("a/ACC1/trackers/TRKnope.json")
+    assert exc.value.status == 404
